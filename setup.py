@@ -27,7 +27,7 @@ setuptools.setup(
         'joblib',
         'matplotlib',
         'mpi4py',
-        'numpy',
+        'numpy==1.24.4',
         'pandas',
         'pybullet',
         'torch',
