@@ -1,5 +1,8 @@
 # Phoenix-Drone-Simulation 
 
+This repository is a **fork** of [phoenix-drone-simulation](https://github.com/SvenGronauer/phoenix-drone-simulation) by **Sven Gronauer**.  
+It builds upon the original work to include additional control modules, trajectory tracking experiments, and new environment configurations.
+
 
 An OpenAI [Gym environment](https://gym.openai.com/envs/#classic_control) based 
 on [PyBullet](https://github.com/bulletphysics/bullet3) for learning to control 
