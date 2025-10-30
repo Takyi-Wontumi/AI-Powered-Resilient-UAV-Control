@@ -1,5 +1,5 @@
 import numpy as np
-from envs.control import Attitude
+from phoenix_drone_simulation.envs.control import Attitude
 
 class PositionController:
    """This is for Controlling the Position"""
@@ -10,7 +10,7 @@ class PositionController:
       self.time_step = time_step
       self.attitude = Attitude(drone=drone, bc=bc, time_step=time_step)    #the attitude handles the motor controls
 
-      # PID gains for x, y, z 
+      # PID gains for positions(x, y, z)  
       # by Lawrence; these values need to be tuned
       self.kp = np.array([1.0, 1.0, 2.0])
       self.ki = np.array([0.0, 0.0, 0.1])
