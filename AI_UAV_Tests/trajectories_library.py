@@ -4,6 +4,11 @@ class Trajectories:
     """Collection of reference trajectory generators for QuadcopterSim."""
 
     @staticmethod
+    def point_traj():
+        """Include a code to fly to a point in space"""
+        return NotImplementedError
+
+    @staticmethod
     def square_traj(t: float, side=1.0, period=16.0, z=1.0):
         """Square path on XY plane."""
         T = period / 4
