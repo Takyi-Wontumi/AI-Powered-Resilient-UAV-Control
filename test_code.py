@@ -1,5 +1,6 @@
-from phoenix_drone_simulation.train import train
-from AI_UAV_Tests.trajectories_library import Trajectories
+from AI_UAV_Tests.quadcopter_simulation import QuadcopterSim
+from AI_UAV_Tests.trajectories_library import Trajectories as path
 
-train(task="followpath", algo="ppo", total_timesteps=3_000_000,
-      trajectory_fn=Trajectories.helix_traj)
+sim = QuadcopterSim(trajectory_fn=path.square_traj)
+sim.simulate(t_final=20)
+sim.animate(speed=5)

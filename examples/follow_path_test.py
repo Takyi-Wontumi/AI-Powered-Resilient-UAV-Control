@@ -15,7 +15,7 @@ from AI_UAV_Tests.trajectories_library import Trajectories as path
 # =========================================================
 if __name__ == "__main__":
     env = DroneFollowPathEnv(
-        trajectory_fn=path.circle_traj,   # or square_traj, helix_traj
+        trajectory_fn=path.circle_traj,   
         control_mode="PWM",
         render_mode="human"
     )
