@@ -6,14 +6,10 @@ import numpy as np
 from phoenix_drone_simulation.envs.base import DroneBaseEnv
 from AI_UAV_Tests.trajectories_library import Trajectories as path
 import matplotlib.pyplot as plt
+# from Drone_Logs import 
 
 class DroneFollowPathEnv(DroneBaseEnv):
    """This is meant to train the drone to follow an arbitrary trajectory ( square, helx, waypoints)"""
-
-   #setting up logger
-   logging.config.fileConfig('temp.conf')
-   # create logger
-   logger = logging.getLogger('simpleExample')
 
    def __init__(self, trajectory_fn=None, control_mode='PWM', log_errors=True,  **kwargs):
       self.trajectory_fn =  trajectory_fn
@@ -39,8 +35,9 @@ class DroneFollowPathEnv(DroneBaseEnv):
       pos_ref, vel_ref = self.trajectory_fn(t)
       self.target_pos = pos_ref
       error_to_ref = pos_ref - self.drone.xyz
+      error_to_vel = vel_ref - self.drone.xyz_dot
 
-      # Log tracking error
+      # Log tracking error **don't forget to add the logging functionality
       if self.log_errors:
          self.error_log.append([t, *error_to_ref, np.linalg.norm(error_to_ref)])
 
