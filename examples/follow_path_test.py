@@ -1,23 +1,24 @@
 """
-Visualization test for DroneFollowPathEnv (Lawrence Wontumi, 2025)
+Visualization test for DroneFollowPathEnv (fixed version)
+Uses followpath_fixed and types via DroneBaseEnv.
 """
 
-import gymnasium as gym
 import numpy as np
 import time
 
-# import your new environment and trajectories
-from phoenix_drone_simulation.envs.followpath import DroneFollowPathEnv
+from phoenix_drone_simulation.envs.base import DroneBaseEnv
+from phoenix_drone_simulation.envs.followpath_fixed import DroneFollowPathEnv
 from AI_UAV_Tests.trajectories_library import Trajectories as path
 
 # =========================================================
 # Instantiate environment
 # =========================================================
 if __name__ == "__main__":
-    env = DroneFollowPathEnv(
-        trajectory_fn=path.circle_traj,   
+    # Type annotate as base env for clarity and Gym-style usage
+    env: DroneBaseEnv = DroneFollowPathEnv(
+        trajectory_fn=path.circle_traj,
         control_mode="PWM",
-        render_mode="human"
+        render_mode="human",
     )
 
     obs, info = env.reset(seed=42)
