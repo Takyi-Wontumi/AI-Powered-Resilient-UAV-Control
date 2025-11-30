@@ -4,9 +4,21 @@ class Trajectories:
     """Collection of reference trajectory generators for QuadcopterSim."""
 
     @staticmethod
-    def point_traj():
-        """Include a code to fly to a point in space"""
-        return NotImplementedError
+    def hover_traj(t: float, pos=(0.0, 0.0, 1.0)):
+        """
+        Stationary hover trajectory.
+        Keeps drone at a fixed position with zero velocity.
+        """
+        x, y, z = pos
+        return np.array([x, y, z]), np.zeros(3)
+
+    @staticmethod
+    def point_traj(target=(1.0, 1.0, 1.0)):
+        """ 
+        Fly to a static point in space and hold there.
+        Could be used with a position controller to reach a waypoint.
+        """
+        return np.array(target), np.zeros(3)
 
     @staticmethod
     def square_traj(t: float, side=1.0, period=16.0, z=1.0):

@@ -6,13 +6,14 @@ import numpy as np
 from phoenix_drone_simulation.envs.base import DroneBaseEnv
 from AI_UAV_Tests.trajectories_library import Trajectories as path
 import matplotlib.pyplot as plt
-# from Drone_Logs import 
+
 
 class DroneFollowPathEnv(DroneBaseEnv):
-   """This is meant to train the drone to follow an arbitrary trajectory ( square, helx, waypoints)"""
+    """This is meant to train the drone to follow arbitrary trajectories
+    (square, helix, circle, waypoints)."""
 
-   def __init__(self, trajectory_fn=None, control_mode='PWM', log_errors=True,  **kwargs):
-      self.trajectory_fn =  trajectory_fn
+    def __init__(self, trajectory_fn=None, control_mode='PWM', log_errors=True, **kwargs):
+      self.trajectory_fn = trajectory_fn
       self.done_dist_threshold = 0.3
       self.penalty_action = 1e-4
       self.penalty_velocity = 1e-4
@@ -20,69 +21,139 @@ class DroneFollowPathEnv(DroneBaseEnv):
       self.penalty_terminal = 100
       self.ARP = 1e-3
 
-      #new functionality added, logging errors
+      # Logging
       self.log_errors = log_errors
-      self.error_log = []     #storing as (time, ex, ey, ez, norm)
+      self.error_log = []
 
-      #initializing the base environment
-      super().__init__(physics='PyBulletPhysics', control_mode=control_mode, drone_model='cf21x_bullet', observation_frequency=100, sim_freq=200, **kwargs)
+      # REQUIRED base parameters
+      init_xyz = np.array([0.0, 0.0, 1.0])
+      init_rpy = np.array([0.0, 0.0, 0.0])
+      init_xyz_dot = np.zeros(3)
+      init_rpy_dot = np.zeros(3)
 
-   def compute_observation(self):
-      """"""
-      
-      # the observation needs 
-      t =  self.iteration / self.SIM_FREQ
-      pos_ref, vel_ref = self.trajectory_fn(t)
-      self.target_pos = pos_ref
-      error_to_ref = pos_ref - self.drone.xyz
-      error_to_vel = vel_ref - self.drone.xyz_dot
+      super().__init__(
+         physics='PyBulletPhysics',
+         control_mode=control_mode,
+         drone_model='cf21x_bullet',
+         observation_frequency=100,
+         sim_freq=200,
 
-      # Log tracking error **don't forget to add the logging functionality
-      if self.log_errors:
-         self.error_log.append([t, *error_to_ref, np.linalg.norm(error_to_ref)])
+         init_xyz=init_xyz,
+         init_rpy=init_rpy,
+         init_xyz_dot=init_xyz_dot,
+         init_rpy_dot=init_rpy_dot,
 
-      obs = np.contatenate([self.drone.xyz, self.drone.quaternion, self.drone.xyz_dot, self.drone.rpy_dot, error_to_ref])
+         **kwargs
+      )
 
-      return obs
-   
-   # Reward section
-   """
-      self.penalty_action x ||action|| --> punishes the magnitude of the control signal (action)
-      self.penalty_velocity x ||self.drone.xyz_dot|| --> penalizes the magnitude of the drone's linear velocity . This is often used to encourage the drone to reach a target and then hover or to conserve kinetic energy
-      self.penalty_spin x ||self.drone.rpy_dot|| --> discourages rapid rotations or unnecessary spinning
-      """
 
-   def compute_reward(self, action):
-      dist = np.linalg.norm(self.drone.xyz -  self.target_pos)    #consider plotting to see the normalized plot
-      penalties = self.penalty_action * np.linalg.norm(action) + self.penalty_velocity * np.linalg.norm(self.drone.xyz_dot) + self.penalty_spin * np.linalg.norm(self.drone.rpy_dot)
+    # ===============================================================
+    # OBSERVATIONS
+    # ===============================================================
+    def compute_observation(self):
+        """Return concatenated state + error vector."""
 
-      reward = -dist - penalties
-      if self.compute_done():
-         reward -= self.penalty_terminal      
-      return reward
-   
-   def compute_done(self):
-      return np.linalg.norm(self.drone.xyz - self.target_pos) > self.done_dist_threshold
-   
-   #other functionality
+        t = self.iteration / self.SIM_FREQ
+        pos_ref, vel_ref = self.trajectory_fn(t)
+        self.target_pos = pos_ref
 
-   def task_specific_reset(self):
-      self.bc.resetBasePositionAndOrientation(self.drone.body_unique_id, posObj=np.array([0, 0, 1]), ornObj=self.init_quaternion)
+        pos_error = pos_ref - self.drone.xyz
+        vel_error = vel_ref - self.drone.xyz_dot
 
-   # -------------------------------
-   
+        # log error
+        if self.log_errors:
+            self.error_log.append([t, *pos_error, np.linalg.norm(pos_error)])
 
+        obs = np.concatenate([
+            self.drone.xyz,
+            self.drone.quaternion,
+            self.drone.xyz_dot,
+            self.drone.rpy_dot,
+            pos_error
+        ])
+
+        return obs
+
+    # ===============================================================
+    # REWARD
+    # ===============================================================
+    def compute_reward(self, action):
+        dist = np.linalg.norm(self.drone.xyz - self.target_pos)
+
+        penalties = (
+            self.penalty_action * np.linalg.norm(action)
+            + self.penalty_velocity * np.linalg.norm(self.drone.xyz_dot)
+            + self.penalty_spin * np.linalg.norm(self.drone.rpy_dot)
+        )
+
+        reward = -dist - penalties
+
+        if self.compute_done():
+            reward -= self.penalty_terminal
+
+        return reward
+
+    # ===============================================================
+    # TERMINATION
+    # ===============================================================
+    def compute_done(self):
+        return np.linalg.norm(self.drone.xyz - self.target_pos) > self.done_dist_threshold
+
+    # ===============================================================
+    # STATE ACCESS FOR CONTROLLER
+    # ===============================================================
+    def get_state(self):
+        return {
+            "pos": self.drone.xyz,
+            "vel": self.drone.xyz_dot,
+            "rpy": self.drone.rpy,
+            "rates": self.drone.rpy_dot
+        }
+
+    # ===============================================================
+    # REQUIRED ABSTRACT METHODS (now implemented)
+    # ===============================================================
+
+    def _setup_task_specifics(self):
+        """No specialized task setup needed."""
+        pass
+
+    def compute_info(self, action=None):
+        """Return optional info dict."""
+        return {}
+
+    def compute_potential(self):
+        """Potential shaping (distance to target)."""
+        return -np.linalg.norm(self.drone.xyz - self.target_pos)
+
+    def get_reference_trajectory(self):
+        """Return trajectory function used."""
+        return self.trajectory_fn
+
+    # ===============================================================
+    # RESET BEHAVIOR
+    # ===============================================================
+    def task_specific_reset(self):
+        """Reset drone at height 1m with default orientation."""
+        self.bc.resetBasePositionAndOrientation(
+            self.drone.body_unique_id,
+            posObj=np.array([0, 0, 1]),
+            ornObj=self.init_quaternion
+        )
+
+
+# ===============================================================
+# ERROR PLOTTING
+# ===============================================================
 def plot_error(self):
-    """Plot tracking error over time instead of saving to CSV."""
+    """Plot tracking error vs time."""
     arr = np.array(self.error_log)
     if arr.size == 0:
         print("No error data recorded.")
         return None
 
-    # Extract logged data
     t, ex, ey, ez, err_norm = arr.T
 
-    # Plot setup
     plt.figure(figsize=(8, 5))
     plt.plot(t, ex, label='X error', color='tab:red')
     plt.plot(t, ey, label='Y error', color='tab:green')
@@ -98,4 +169,3 @@ def plot_error(self):
     plt.show()
 
     return arr
-
