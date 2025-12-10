@@ -1,57 +1,62 @@
-"""Use an Attitude-Rate Controller to stabilize the drone for Take-off task.
-
-Note: the thrust of the drone is hard-coded.
-
-Author:     Sven Gronauer
-Created:    19.04.2022
 """
+Use an Attitude-Rate Controller to stabilize the drone for Take-off task.
+
+Author: Sven Gronauer
+Modified by: Lawrence Wontumi (2025)
+"""
+
 import time
 import numpy as np
 
-# local imports
 from phoenix_drone_simulation.envs.takeoff import DroneTakeOffBulletEnv
 from phoenix_drone_simulation.envs.control import AttitudeRate
 
 
 def main():
-    # control mode of DroneTakeOffBulletEnv is PWM by default:
+    # === ENVIRONMENT ===
     env = DroneTakeOffBulletEnv(render_mode="human")
 
-    # overwrite PWM control with Attitude-Rate PID controller
+    # Use Attitude-Rate PID instead of raw PWM
     env.drone.control = AttitudeRate(
         bc=env.bc,
         drone=env.drone,
         time_step=env.TIME_STEP
-
     )
 
     env.enable_reset_distribution = True
-    # set domain randomization (DR) to zero such that all motors have same
-    # properties
-    env.domain_randomization = 0.0
-    T = 10000
+    env.domain_randomization = 0.0   # make takeoff behavior predictable
 
-    # == Action Design:
-    # a[0]: thrust
-    # a[1:3]: roll_dot, pitch_dot, yaw_dot
-    actions = np.zeros((T, 4))
-    actions[:, 0] = env.drone.HOVER_ACTION + 0.2  # thrust
-    actions[:, 1] = 0  # roll_dot
-    actions[:, 2] = 0  # pitch_dot
-    actions[:, 3] = 0  # yaw_dot
+    dt = env.TIME_STEP
+    SIM_STEPS = 20000                # <<< increase simulation duration here
 
-    env.reset()
-    j = 0
-    while True:
-        time.sleep(1 / 100)
-        obs, reward, terminated, truncated, info = env.step(actions[j])
-        j += 1
-        done = terminated or truncated
-        if done or j % 150 == 0:
-            j = 0
-            env.reset()
-    # env.close()
+    # === ACTION FORMAT ===
+    # a = [thrust_norm, roll_rate_norm, pitch_rate_norm, yaw_rate_norm]
+    actions = np.zeros((SIM_STEPS, 4))
+
+    # Use hover + slight extra thrust for takeoff
+    actions[:, 0] = env.drone.HOVER_ACTION + 0.10
+    actions[:, 1] = 0.0
+    actions[:, 2] = 0.0
+    actions[:, 3] = 0.0
+
+    obs, info = env.reset()
+
+    for step in range(SIM_STEPS):
+
+        obs, reward, terminated, truncated, info = env.step(actions[step])
+
+        # Current altitude (z)
+        z = env.drone.xyz[2]
+
+        if step % 100 == 0:
+            print(f"Step {step:05d} | z = {z:.3f} m")
+
+        if terminated or truncated:
+            print("Reset triggered. Restarting episode.\n")
+            obs, info = env.reset()
+
+        time.sleep(dt)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

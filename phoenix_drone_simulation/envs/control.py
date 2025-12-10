@@ -285,3 +285,54 @@ class Attitude(Control):
         self.attitude_rate_controller.reset()
         self.integral = np.zeros(3)
         self.last_error = np.zeros(3)
+
+class AttitudeMod(Attitude):
+    def __init__(self, drone, bc: bullet_client.BulletClient, time_step: float):
+        super(AttitudeMod, self).__init__(drone, bc, time_step)
+    
+    def act(self, action, **kwargs):
+        """Action  [thrust, roll, pitch, yaw_rate] to PWM signals.
+
+        Calls Attitude Controller => Attitude Rate Controller => PWM
+        """
+        clipped_action  = np.clip(action, -1, 1)
+        rp_target       = clipped_action[1:3] * np.pi/18 # in rad
+        rp_yd_target    = clipped_action[3] * np.pi/4 # in rad/s
+
+        # Action = [thrust, roll, pitch, yaw]
+        # thrust = 45000 + clipped_action[0] * 10000
+        thrust = 30000 + clipped_action[0] * 30000
+        rpy_dot_targets = self.compute_output(rp_target, rp_yd_target)  # in [rad / s]
+        rpy_dot_factors = self.attitude_rate_controller.compute_output(
+            rpy_dot_targets)
+        PWMs = rpy_control_factors_to_PWM(rpy_dot_factors, thrust)
+
+        return PWMs
+    
+    def compute_output(self,
+                       rp_target: np.ndarray,  # [rad] in world coordinates
+                       y_dot_target: np.ndarray  # [rad/s] in world coordinates
+                       ) -> np.ndarray:  # in [rad / s]
+        """Computes angle rates for the lower-level Attitude Rate Controller."""
+        dt = self.time_step
+
+        # Note: PyBullet calculates in rad whereas the firmware takes degrees
+        error = self.rad_to_degree(rp_target - self.drone.rpy[0:2])  # in [deg]
+        derivative = (error - self.last_error) / dt
+        self.last_error = error
+        self.integral += error * dt
+        self.integral = np.clip(self.integral,
+                                -self.integral_limits[0:2],
+                                self.integral_limits[0:2])
+        rp_offsets = self.kps[0:2] * error + self.kis[0:2] * self.integral \
+                      + self.kds[0:2] * derivative  # in [degree / s]
+        rpy_offsets = np.array([rp_offsets[0], rp_offsets[1], self.rad_to_degree(y_dot_target)])
+        return self.degree_to_rad(rpy_offsets)  # in [rad / s]
+    
+    def reset(self):
+        r"""Resets the internal variables of the PIDs. """
+        super().reset()
+        self.attitude_rate_controller.reset()
+        self.integral = np.zeros(2)
+        self.last_error = np.zeros(2)
+    

@@ -4,7 +4,7 @@ class Trajectories:
     """Collection of reference trajectory generators for QuadcopterSim."""
 
     @staticmethod
-    def hover_traj(t: float, pos=(0.0, 0.0, 1.0)):
+    def hover_traj(t: float=0.0, pos=(0.0, 0.0, 1.0)):
         """
         Stationary hover trajectory.
         Keeps drone at a fixed position with zero velocity.

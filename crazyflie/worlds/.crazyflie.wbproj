@@ -5,6 +5,6 @@ sceneTreePerspectives: 000000ff000000010000000300000022000000c0000000fa010000000
 maximizedDockId: -1
 centralWidgetVisible: 1
 orthographicViewHeight: 1
-textFiles: 2 "../../../AppData/Local/Programs/Webots/projects/robots/bitcraze/crazyflie/controllers/crazyflie_py_wallfollowing/pid_controller.py" "controllers/crazyflie/crazyflie.c" "controllers/trajectory_follower/trajectory_follower.py" "controllers/crazyflie_experimental/crazyflie_experimental.py"
+textFiles: 1 "../../../AppData/Local/Programs/Webots/projects/robots/bitcraze/crazyflie/controllers/crazyflie_py_wallfollowing/pid_controller.py" "controllers/crazyflie/crazyflie.c" "controllers/trajectory_follower/trajectory_follower.py" "controllers/crazyflie_experimental/crazyflie_experimental.py"
 consoles: Console:All:All
 renderingDevicePerspectives: Crazyflie:camera;0;0.157407;0;0

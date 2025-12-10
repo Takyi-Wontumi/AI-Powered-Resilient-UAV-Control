@@ -7,7 +7,7 @@ class DroneFollowTrajectoryEnv(DroneBaseEnv):
     def __init__(
         self,
         trajectory_fn,
-        control_mode="Attitude",
+        control_mode="AttitudeRate",
         sim_freq=200,
         observation_frequency=100,
         done_dist_threshold=9999.0,

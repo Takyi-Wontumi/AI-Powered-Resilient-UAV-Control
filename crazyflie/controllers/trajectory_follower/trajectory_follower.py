@@ -20,9 +20,9 @@ print("Added to PYTHONPATH:", ROOT_DIR)
 import math
 import numpy as np
 from controller import Robot
-from AI_UAV_Tests.trajectory_manager import TrajectoryManager
+#from AI_UAV_Tests.trajectory_manager import TrajectoryManager
 from pid_controller import pid_velocity_fixed_height_controller
-from AI_UAV_Tests.test_class import TestClass
+#from AI_UAV_Tests.test_class import TestClass
 
 YAW_GAIN = 1.2
 

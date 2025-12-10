@@ -306,6 +306,20 @@ class QuadcopterPID:
             "ey": pos_ref[1] - self.x[1],
             "ez": z_ref - self.x[2]
         }
+    
+    def compute_attitude_rate_commands(self, pos_ref, vel_ref, z_ref=1.0):
+        """
+        Return roll_rate, pitch_rate, yaw_rate that AttitudeRate expects.
+        """
+        # Step 1: run your position PID
+        U1, phi_des, theta_des, psi_des = self.position_pid(pos_ref, vel_ref, z_ref)
+
+        # Step 2: convert desired angles → desired rates
+        rates_des = self.attitude_pid(phi_des, theta_des, psi_des)
+
+        # rates_des = [p_des, q_des, r_des] in rad/s
+        return rates_des
+
 
 
 # =========================================================
