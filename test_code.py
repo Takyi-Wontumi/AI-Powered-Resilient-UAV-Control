@@ -1,202 +1,182 @@
+"""
+Phoenix Trajectory Following with QuadcopterPID Controller + 60 FPS MP4 Export
+"""
+
+import sys, os
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.append(ROOT_DIR)
+
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+import pybullet as pb
+import imageio.v3 as iio      # MP4 writer with ffmpeg backend
+
+### Phoenix imports
+from phoenix_drone_simulation.envs.hover import DroneHoverBulletEnv
+from phoenix_drone_simulation.envs.control import AttitudeRate
+
+### Custom controller
+from AI_UAV_Tests.quadcopter_env import QuadcopterPID
+
+### Trajectory
+from AI_UAV_Tests.trajectories_library import Trajectories as path
 
 
-def reduction(value, order_sensitivity=0):
-   import numpy as np
-   return int (value * (order_sensitivity / 100))
-
-print(reduction(45000, 1))
-# """
-# WORKING AttitudeRate Circle / Hover Demo for Phoenix Crazyflie
-# Author: Lawrence Wontumi (2025)
-
-# - Single PyBullet GUI (no double-GUI / ExampleBrowser conflict)
-# - Stable altitude
-# - Circle tracking using AttitudeRate
-# """
-
-# import os
-# # Kill the stupid ExampleBrowser so Phoenix can own the GUI
-# os.environ["PYBULLET_NO_EXAMPLE_BROWSER"] = "1"
-
-# import time
-# import numpy as np
-
-# from phoenix_drone_simulation.envs.trajectory import DroneFollowTrajectoryEnv
-# from AI_UAV_Tests.trajectories_library import Trajectories
+# =========================================================
+#  Helper: thrust → normalized command
+# =========================================================
+def thrust_to_action(U1: float, mass: float, g: float = 9.81) -> float:
+    hover_T = mass * g
+    a0 = (U1 / hover_T - 0.9) / 0.4
+    return float(np.clip(a0, -1.0, 1.0))
 
 
-# # ============================================================
-# #   STABLE ATTITUDERATE CONTROLLER
-# # ============================================================
-# class StableAttRateController:
-#     def __init__(self):
-#         # Normalized thrust command (AttitudeRate: thrust_pwm = 30000 + 30000 * u)
-#         # u ≈ 0.10–0.15 is around hover for this model
-#         self.hover_cmd = 0.12
+# =========================================================
+#  MAIN
+# =========================================================
+def main():
 
-#         # Altitude PD
-#         self.Kp_z = 6.0
-#         self.Kd_z = 3.0
+    env: DroneHoverBulletEnv = DroneHoverBulletEnv(render_mode="human")
 
-#         # XY: velocity error -> desired tilt (in body frame)
-#         self.Kp_v = 1.6
+    env.drone.control = AttitudeRate(
+        bc=env.bc,
+        drone=env.drone,
+        time_step=env.TIME_STEP
+    )
 
-#         # Attitude: angle error -> angle rate
-#         self.Kp_ang = 6.0
+    env.enable_reset_distribution = True
+    env.domain_randomization = -5.0
 
-#         self.g = 9.81
-#         self.max_tilt = np.deg2rad(12.0)  # ±12° tilt limit
+    quad = QuadcopterPID(dt=env.TIME_STEP)
 
-#     # ----------------- Altitude control -----------------
-#     def thrust_ctrl(self, pos, vel, pos_ref):
-#         z = pos[2]
-#         vz = vel[2]
-#         z_ref = pos_ref[2]
+    obs, info = env.reset()
+    t = 0.0
 
-#         ez = z_ref - z
-#         evz = -vz
+    T_final = 1.0
+    dt = env.TIME_STEP
+    steps = int(T_final / dt)
 
-#         u = self.hover_cmd + self.Kp_z * ez + self.Kd_z * evz
-#         # Safe range for normalized thrust
-#         u = float(np.clip(u, -0.2, 0.4))
-#         return u
+    log_t, log_pos, log_ref = [], [], []
 
-#     # ----------------- Main control law -----------------
-#     def act(self, state, pos_ref, vel_ref, dt):
-#         pos = state["pos"]
-#         vel = state["vel"]
-#         rpy = state["rpy"]
-#         psi = rpy[2]
+    # Frame buffers
+    frames = []
+    frame_times = []
 
-#         # ----- Z control -----
-#         thrust_norm = self.thrust_ctrl(pos, vel, pos_ref)
+    print(f"[INFO] Running simulation for {steps} steps...")
 
-#         # ----- XY velocity error in world frame -----
-#         vel_err = vel_ref - vel  # [vx, vy, vz] world
+    for k in range(steps):
 
-#         # ----- Transform vel error to body frame -----
-#         c = np.cos(psi)
-#         s = np.sin(psi)
-#         R_wb = np.array([[ c,  s],
-#                          [-s,  c]])
-#         vel_err_b = R_wb @ vel_err[:2]
+        # ===== Phoenix → controller state injection =====
+        x = env.drone.xyz
+        v = env.drone.xyz_dot
+        ang = env.drone.rpy
+        rate = env.drone.rpy_dot
+        quad.inject_external_state(x, v, ang, rate)
 
-#         # ----- Desired tilt from body-frame acceleration demand -----
-#         ax_des = self.Kp_v * vel_err_b[0]   # forward/back
-#         ay_des = self.Kp_v * vel_err_b[1]   # left/right
+        # ===== Trajectory reference =====
+        pos_ref, vel_ref = path.circle_traj(t)
+        z_ref = pos_ref[2]
 
-#         theta_des = -ax_des / self.g        # pitch
-#         phi_des   =  ay_des / self.g        # roll
+        # ===== Controller output =====
+        ctrl = quad.step(pos_ref, vel_ref, z_ref=z_ref)
+        rates_des = ctrl["rates_des"]
+        U1 = ctrl["thrust_cmd"]
 
-#         theta_des = np.clip(theta_des, -self.max_tilt, self.max_tilt)
-#         phi_des   = np.clip(phi_des,   -self.max_tilt, self.max_tilt)
+        # ===== Build AttitudeRate action =====
+        action = np.zeros(4, dtype=np.float32)
+        action[0] = thrust_to_action(U1, mass=quad.m, g=quad.g)
+        rate_norm = rates_des / (np.pi / 3.0)
+        action[1:4] = np.clip(rate_norm, -1.0, 1.0)
 
-#         # ----- Angle error -> desired body rates -----
-#         phi, theta = rpy[0], rpy[1]
+        # ===== Step Phoenix =====
+        obs, reward, terminated, truncated, info = env.step(action)
 
-#         e_phi   = phi_des   - phi
-#         e_theta = theta_des - theta
+        # ===== Logging =====
+        log_t.append(t)
+        log_pos.append(x.copy())
+        log_ref.append(pos_ref.copy())
 
-#         p_des = self.Kp_ang * e_phi        # roll rate [rad/s]
-#         q_des = self.Kp_ang * e_theta      # pitch rate [rad/s]
-#         r_des = 0.0                        # no yaw spin by default
+        # ===== High-speed camera capture =====
+        if k == 0:
+            start_time = time.time()
 
-#         rate_scale = np.pi / 3.0           # AttitudeRate: action[1:4]*pi/3 = rpy_dot_target
+        width, height, rgb, depth, seg = pb.getCameraImage(
+            width=1280,
+            height=720,
+            renderer=pb.ER_BULLET_HARDWARE_OPENGL
+        )
 
-#         roll_rate_norm  = float(np.clip(p_des / rate_scale,   -1.0, 1.0))
-#         pitch_rate_norm = float(np.clip(q_des / rate_scale,   -1.0, 1.0))
-#         yaw_rate_norm   = float(np.clip(r_des / rate_scale,   -1.0, 1.0))
+        rgb_img = np.reshape(rgb, (height, width, 4))[:, :, :3]
+        frames.append(rgb_img)
+        frame_times.append(time.time() - start_time)
 
-#         action = np.array(
-#             [thrust_norm, roll_rate_norm, pitch_rate_norm, yaw_rate_norm],
-#             dtype=np.float32
-#         )
+        # ===== Simulation time update =====
+        t += dt
 
-#         if not np.isfinite(action).all():
-#             print("[WARN] NaN in action, forcing hover:", action)
-#             action = np.array([self.hover_cmd, 0.0, 0.0, 0.0], dtype=np.float32)
+        if terminated or truncated:
+            quad.reset()
+            obs, info = env.reset()
+            t = 0.0
 
-#         return action
+    # =========================================================
+    # 60 FPS MP4 EXPORT
+    # =========================================================
+    print("[INFO] Preparing MP4 output...")
 
+    frame_times = np.array(frame_times)
+    frame_times -= frame_times[0]
 
-# # ============================================================
-# #   TRAJECTORIES
-# # ============================================================
-# def hover_traj(t):
-#     pos = np.array([0.4, 0.0, 1.0], dtype=np.float32)
-#     vel = np.zeros(3, dtype=np.float32)
-#     return pos, vel
+    target_fps = 60
+    target_dt = 1.0 / target_fps
 
+    max_time = frame_times[-1]
+    uniform_times = np.arange(0, max_time, target_dt)
 
-# def circle_traj(t):
-#     # Uses your Trajectories.circle_traj
-#     return Trajectories.circle_traj(
-#         t,
-#         radius=0.40,
-#         period=20.0,
-#         z=1.0
-#     )
+    # Interpolate frame indices
+    interp_idx = np.interp(
+        uniform_times,
+        frame_times,
+        np.arange(len(frames))
+    ).astype(int)
 
+    smooth_frames = [frames[i] for i in interp_idx]
 
-# # ============================================================
-# #   MAIN
-# # ============================================================
-# def main():
-#     USE_CIRCLE = True  # False = pure hover at (0.4, 0, 1)
+    print("[INFO] Writing MP4 video (60 FPS)...")
 
-#     traj_fn = circle_traj if USE_CIRCLE else hover_traj
+    iio.imwrite(
+        "simulation_60fps.mp4",
+        np.stack(smooth_frames),
+        fps=60,
+        codec="libx264",
+        quality=8
+    )
 
-#     # Let Phoenix own the GUI. We do NOT call pybullet.connect() ourselves.
-#     env = DroneFollowTrajectoryEnv(
-#         trajectory_fn=traj_fn,
-#         control_mode="AttitudeRate",
-#         gui=True,                 # Phoenix creates one GUI instance
-#         render_mode="human",
-#     )
-#     env.enable_reset_distribution = False
-#     env.domain_randomization = -1
+    print("[INFO] Saved → simulation_60fps.mp4")
 
-#     ctrl = StableAttRateController()
+    # =========================================================
+    # Plot tracking
+    # =========================================================
+    log_t = np.array(log_t)
+    log_pos = np.vstack(log_pos)
+    log_ref = np.vstack(log_ref)
 
-#     obs, info = env.reset()
-#     dt = env.TIME_STEP
+    fig, axs = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
+    labels = ["X [m]", "Y [m]", "Z [m]"]
 
-#     mode_str = "Circle" if USE_CIRCLE else "Hover"
-#     print(f"[INFO] Running: Stable AttitudeRate {mode_str} Flight")
+    for i in range(3):
+        axs[i].plot(log_t, log_pos[:, i], label=f"{labels[i]} actual")
+        axs[i].plot(log_t, log_ref[:, i], "--", label=f"{labels[i]} ref")
+        axs[i].grid(True)
+        axs[i].legend()
 
-#     try:
-#         for step in range(6000):
-#             t = env.iteration / env.SIM_FREQ
-#             pos_ref, vel_ref = traj_fn(t)
-#             state = env.get_state()
+    axs[-1].set_xlabel("Time [s]")
+    plt.tight_layout()
+    plt.show()
 
-#             action = ctrl.act(state, pos_ref, vel_ref, dt)
-
-#             obs, rew, terminated, truncated, info = env.step(action)
-
-#             if step % 200 == 0:
-#                 print(
-#                     f"t={t:.2f} "
-#                     f"pos={state['pos']} "
-#                     f"ref={pos_ref} "
-#                     f"thrust={action[0]:.3f}"
-#                 )
-
-#             if terminated or truncated:
-#                 print("[INFO] Episode ended, resetting...")
-#                 obs, info = env.reset()
-
-#             time.sleep(dt)
-
-#     finally:
-#         # Make sure we cleanly close the client so you don't get the
-#         # 'Not connected to physics server' spam next run.
-#         if hasattr(env, "bc"):
-#             try:
-#                 env.bc.disconnect()
-#             except Exception:
-#                 pass
+    env.close()
 
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()

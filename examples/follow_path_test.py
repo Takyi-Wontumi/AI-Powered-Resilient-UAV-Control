@@ -77,7 +77,11 @@ def main():
 
     T_final = 20.0                   # this is the total time for the simulation
     dt = env.TIME_STEP
+    
     steps = int(T_final / dt)
+    print(steps)
+
+    # input("\nPress ENTER to start the simulation...")
 
     # Logs for plotting
     log_t = []
@@ -90,7 +94,7 @@ def main():
         # Real-time pacing
         time.sleep(dt)
 
-        # 3a. Getting current drone state from Phoenix
+        # Getting current drone state from Phoenix
         x = env.drone.xyz
         v = env.drone.xyz_dot
         ang = env.drone.rpy
@@ -99,15 +103,11 @@ def main():
         # Inject into QuadcopterPID so it uses real physics state
         quad.inject_external_state(x, v, ang, rate)
 
-        # -------------------------------------------------
-        # 3b. Get reference from trajectory
-        # -------------------------------------------------
-        pos_ref, vel_ref = path.hover_traj(t)
+        # Get reference from trajectory
+        pos_ref, vel_ref = path.square_traj(t)
         z_ref = pos_ref[2]
-
-        # -------------------------------------------------
-        # 3c. Run your full PID cascade to get rate + thrust commands
-        # -------------------------------------------------
+        
+        # full PID with thrust commands
         ctrl = quad.step(pos_ref, vel_ref, z_ref=z_ref)
 
         rates_des = ctrl["rates_des"]     # [p_des, q_des, r_des] rad/s
@@ -115,9 +115,9 @@ def main():
 
         log_thrust.append(U1)       #logging thrust
 
-        # -------------------------------------------------
-        # 3d. Build AttitudeRate action
-        # -------------------------------------------------
+        
+        # Build AttitudeRate action
+        
         action = np.zeros(4, dtype=np.float32)
 
         # a[0]: thrust command
@@ -130,9 +130,9 @@ def main():
         rate_norm = rates_des / (np.pi / 3.0)
         action[1:4] = np.clip(rate_norm, -1.0, 1.0)
 
-        # -------------------------------------------------
+        
         # Setting up the  Phoenix environment
-        # -------------------------------------------------
+        
         obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
 
@@ -149,9 +149,9 @@ def main():
             obs, info = env.reset()
             t = 0.0
 
-    # -----------------------------------------------------
+    
     # 4. Convert logs to arrays and plot tracking
-    # -----------------------------------------------------
+
     log_t = np.array(log_t)
     log_pos = np.vstack(log_pos)
     log_ref = np.vstack(log_ref)

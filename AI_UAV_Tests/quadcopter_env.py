@@ -1,7 +1,6 @@
 import numpy as np
 
-KILL_HEIGHT = 2.5
-
+KILL_HEIGHT = 5
 
 # =========================================================
 #  Full PID-Based Crazyflie-Style Quadcopter Simulator
@@ -37,15 +36,15 @@ class QuadcopterPID:
         # -----------------------------
         # XY Position PD
         # -----------------------------
-        self.Kp_xy = np.array([0.8, 0.8])
-        self.Kd_xy = np.array([0.6, 0.6])
+        self.Kp_xy = np.array([8, 8])
+        self.Kd_xy = np.array([15, 15])
 
         # -----------------------------
         # Altitude PID
         # -----------------------------
-        self.Kp_z = 4.0
-        self.Ki_z = 1.5
-        self.Kd_z = 2.0
+        self.Kp_z = 16.2
+        self.Ki_z = 7.0175
+        self.Kd_z = 9.3494
         self.z_int = 0.0
         self.z_int_limit = 1.0
 

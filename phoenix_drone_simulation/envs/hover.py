@@ -11,7 +11,7 @@ class DroneHoverBaseEnv(DroneBaseEnv):
             drone_model: str,
             observation_noise=1,  # must be positive in order to add noise
             domain_randomization: float = 0.10,  # use 10% DR as default
-            target_pos: np.ndarray = np.array([0, 0, 1.0], dtype=np.float32),
+            target_pos: np.ndarray = np.array([0, 0, 0], dtype=np.float32),
             sim_freq=200,  # in Hz
             aggregate_phy_steps=2,  # sub-steps used to calculate motor dynamics
             observation_frequency=100,  # in Hz
@@ -67,7 +67,7 @@ class DroneHoverBaseEnv(DroneBaseEnv):
         # print(f'Spawn target pos at:', self.target_pos)
         target_visual = self.bc.createVisualShape(
             self.bc.GEOM_SPHERE,
-            radius=0.02,
+            radius=0.2,
             rgbaColor=[0.95, 0.1, 0.05, 0.4],
         )
         # Spawn visual without collision shape
