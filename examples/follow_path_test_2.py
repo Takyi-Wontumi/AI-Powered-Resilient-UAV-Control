@@ -31,9 +31,6 @@ from phoenix_drone_simulation.envs.control import AttitudeRate
 #adding custom quadcopter
 from AI_UAV_Tests.quadcopter_env import QuadcopterPID
 
-# Your trajectory library
-from AI_UAV_Tests.trajectories_library import Trajectories as path
-
 # =========================================================
 #  Helper: map thrust (N) → AttitudeRate normalized action[0]
 # =========================================================
@@ -57,101 +54,109 @@ def thrust_to_action(U1: float, mass: float, g: float = 9.81) -> float:
 #  main section with for the simulation
 # =========================================================
 def main():
+    # -------------------------------------------------
+    # 1. Environment setup
+    # -------------------------------------------------
     env: DroneHoverBulletEnv = DroneHoverBulletEnv(render_mode="human")
 
-    # controlling the drone with AttitudeRate rather than PWM
     env.drone.control = AttitudeRate(
         bc=env.bc,
         drone=env.drone,
         time_step=env.TIME_STEP
     )
 
-    # make reset deterministic or add reduce randomness to the drone
-    env.enable_reset_distribution = True
-    env.domain_randomization = -1.0
+    env.enable_reset_distribution = False
+    env.domain_randomization = 0.0
 
     quad = QuadcopterPID(dt=env.TIME_STEP)
 
     obs, info = env.reset()
+    quad.reset()
+
+    print("action_space:", env.action_space.low, env.action_space.high)
+
+    # -------------------------------------------------
+    # 2. Mission Planner trajectory (THIS is the change)
+    # -------------------------------------------------
+    from AI_UAV_Tests.trajectories_library import MissionPlannerTrajectory
+
+    MISSION_PATH = r"C:\Users\Lawrence Wontumi\Downloads\AI-Powered-Resilient-UAV-Control\Realworld_Deployment\Mission Planner\ChapelHill_Test2.mission"
+    TOTAL_TIME = 60.0
+
+    traj = MissionPlannerTrajectory(MISSION_PATH, total_time=TOTAL_TIME)
+
+    # Explicit flight phases (no magic)
+    traj.add_takeoff_min_jerk(t_start=0.0, duration=3.0, target_z=1.0)
+    traj.add_hover(t_start=3.0, duration=2.0)
+    traj.add_landing(t_start=55.0, duration=5.0, ground_z=0.0)
+
+    print(traj.summary())
+
+    # -------------------------------------------------
+    # 3. Simulation timing
+    # -------------------------------------------------
+    dt = env.TIME_STEP
+    steps = int((TOTAL_TIME + 10.0) / dt)  # extra time for landing
     t = 0.0
 
-    T_final = 20.0                   # this is the total time for the simulation
-    dt = env.TIME_STEP
-    
-    steps = int(T_final / dt)
-    print(steps)
-
-    # input("\nPress ENTER to start the simulation...")
-
-    # Logs for plotting
+    # -------------------------------------------------
+    # 4. Logs
+    # -------------------------------------------------
     log_t = []
     log_pos = []
     log_ref = []
-    log_pwm = []
     log_thrust = []
+    log_pwm = []
 
+    # -------------------------------------------------
+    # 5. Main control loop
+    # -------------------------------------------------
     for k in range(steps):
-        # Real-time pacing
         time.sleep(dt)
 
-        # Getting current drone state from Phoenix
+        # Phoenix state
         x = env.drone.xyz
         v = env.drone.xyz_dot
         ang = env.drone.rpy
         rate = env.drone.rpy_dot
 
-        # Inject into QuadcopterPID so it uses real physics state
         quad.inject_external_state(x, v, ang, rate)
 
-        # Get reference from trajectory
-        pos_ref, vel_ref = path.point_traj((0, 0, 7))
+        # ===== THIS IS THE MONEY LINE =====
+        pos_ref, vel_ref = traj(t)
         z_ref = pos_ref[2]
-        
-        # full PID with thrust commands
+
+        # Controller
         ctrl = quad.step(pos_ref, vel_ref, z_ref=z_ref)
 
-        rates_des = ctrl["rates_des"]     # [p_des, q_des, r_des] rad/s
-        U1        = ctrl["thrust_cmd"]    # thrust (N)
+        rates_des = ctrl["rates_des"]
+        U1 = ctrl["thrust_cmd"]
 
-        log_thrust.append(U1)       #logging thrust
-
-        
-        # Build AttitudeRate action
-        
+        # Action
         action = np.zeros(4, dtype=np.float32)
-
-        # a[0]: thrust command
         action[0] = thrust_to_action(U1, mass=quad.m, g=quad.g)
-        log_pwm.append(action[0])       #logging PWM
-        print(f"Thrust: {U1} N, PWM: {action[0]}")
+        action[1:4] = np.clip(rates_des / (np.pi / 3.0), -1.0, 1.0)
 
-        # a[1:4]: normalized attitude rate commands
-        # AttitudeRate: rpy_dot_target = a[1:4] * (π/3)
-        rate_norm = rates_des / (np.pi / 3.0)
-        action[1:4] = np.clip(rate_norm, -1.0, 1.0)
-
-        
-        # Setting up the  Phoenix environment
-        
         obs, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
 
-        # Log time, state, and reference
+        # Logs
         log_t.append(t)
         log_pos.append(x.copy())
         log_ref.append(pos_ref.copy())
+        log_thrust.append(U1)
+        log_pwm.append(action[0])
 
         t += dt
 
-        if done:
-            # Reset controller integrals & env
+        if terminated or truncated:
+            print("Environment reset")
             quad.reset()
             obs, info = env.reset()
             t = 0.0
 
-    
-    # 4. Convert logs to arrays and plot tracking
-
+    # -------------------------------------------------
+    # 6. Plot tracking
+    # -------------------------------------------------
     log_t = np.array(log_t)
     log_pos = np.vstack(log_pos)
     log_ref = np.vstack(log_ref)
@@ -160,8 +165,9 @@ def main():
     labels = ["X [m]", "Y [m]", "Z [m]"]
 
     for i in range(3):
-        axs[i].plot(log_t, log_pos[:, i], label=f"{labels[i]} actual")
-        axs[i].plot(log_t, log_ref[:, i], "--", label=f"{labels[i]} ref")
+        axs[i].plot(log_t, log_pos[:, i], label="actual")
+        axs[i].plot(log_t, log_ref[:, i], "--", label="reference")
+        axs[i].set_ylabel(labels[i])
         axs[i].grid(True)
         axs[i].legend()
 
@@ -170,7 +176,6 @@ def main():
     plt.show()
 
     env.close()
-
 
 if __name__ == "__main__":
     main()

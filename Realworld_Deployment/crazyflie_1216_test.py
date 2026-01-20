@@ -31,7 +31,6 @@ from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 from cflib.crazyflie.log import LogConfig
 from cflib.crazyflie.syncLogger import SyncLogger
 
-
 from AI_UAV_Tests.quadcopter_env import QuadcopterPID
 from AI_UAV_Tests.trajectories_library import Trajectories as path
 
