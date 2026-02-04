@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 from phoenix_drone_simulation.envs.hover import DroneHoverBulletEnv
 from phoenix_drone_simulation.envs.control import AttitudeRate
 
-#adding custom quadcopter
+# Your controller + trajectory
 from AI_UAV_Tests.quadcopter_env import QuadcopterPID
 
 # =========================================================

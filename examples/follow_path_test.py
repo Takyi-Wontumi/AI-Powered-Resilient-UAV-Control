@@ -34,6 +34,7 @@ from AI_UAV_Tests.quadcopter_env import QuadcopterPID
 # Your trajectory library
 from AI_UAV_Tests.trajectories_library import Trajectories as path
 
+
 # =========================================================
 #  Helper: map thrust (N) → AttitudeRate normalized action[0]
 # =========================================================
@@ -149,7 +150,6 @@ def main():
             obs, info = env.reset()
             t = 0.0
 
-    
     # 4. Convert logs to arrays and plot tracking
 
     log_t = np.array(log_t)
