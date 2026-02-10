@@ -320,3 +320,25 @@ class QuadcopterPID:
             "ang": self.ang,
             "rate": self.rate
         }
+
+# =========================================================
+# State Buffer 
+# =========================================================
+class StateBuffer:
+    def __init__(self):
+        self.x = None
+        self.v = None
+        self.last_t = None
+
+    def update(self, x, v, t):
+        self.x = x.copy()
+        self.v = v.copy()
+        self.last_t = t
+
+    def predict(self, t):
+        if self.x is None:
+            raise RuntimeError("StateBuffer used before initialization")
+        dt = t - self.last_t
+        x_pred = self.x + self.v * dt
+        v_pred = self.v
+        return x_pred, v_pred

@@ -105,7 +105,7 @@ def main():
         quad.inject_external_state(x, v, ang, rate)
 
         # Get reference from trajectory
-        pos_ref, vel_ref = path.point_traj((0, 0, 7))
+        pos_ref, vel_ref = path.point_traj((1, 0, 0.75))
         z_ref = pos_ref[2]
         
         # full PID with thrust commands
