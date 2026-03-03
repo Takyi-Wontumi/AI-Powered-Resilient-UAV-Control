@@ -1,0 +1,59 @@
+{
+    "ac_kwargs":	{
+        "pi":	{
+            "activation":	"relu",
+            "hidden_sizes":	[
+                128,
+                128
+            ]
+        },
+        "val":	{
+            "activation":	"tanh",
+            "hidden_sizes":	[
+                128,
+                128
+            ]
+        }
+    },
+    "actor":	"mlp",
+    "adv_estimation_method":	"gae",
+    "alg":	"ppo",
+    "check_freq":	25,
+    "entropy_coef":	0.02,
+    "epochs":	100,
+    "exp_name":	"Mission_circle_AttitudeRate",
+    "gamma":	0.99,
+    "lam":	0.95,
+    "logger_kwargs":	{
+        "exp_name":	"Mission_circle_AttitudeRate",
+        "level":	1,
+        "log_dir":	"C:\\Users\\Lawrence Wontumi\\Downloads\\AI-Powered-Resilient-UAV-Control\\runs\\Mission_circle_AttitudeRate\\2026-02-17__21-55-34\\seed_00000",
+        "use_tensor_board":	true,
+        "verbose":	true
+    },
+    "max_ep_len":	1000,
+    "max_grad_norm":	0.5,
+    "num_mini_batches":	16,
+    "optimizer":	"Adam",
+    "pi_lr":	0.0003,
+    "save_freq":	10,
+    "seed":	0,
+    "steps_per_epoch":	16000,
+    "target_kl":	0.01,
+    "train_pi_iterations":	80,
+    "train_v_iterations":	5,
+    "trust_region":	"plain",
+    "use_entropy":	true,
+    "use_exploration_noise_anneal":	false,
+    "use_kl_early_stopping":	false,
+    "use_linear_lr_decay":	false,
+    "use_max_grad_norm":	false,
+    "use_reward_scaling":	true,
+    "use_shared_weights":	false,
+    "use_standardized_advantages":	false,
+    "use_standardized_obs":	true,
+    "verbose":	true,
+    "vf_lr":	0.001,
+    "video_freq":	-1,
+    "weight_initialization":	"kaiming_uniform"
+}

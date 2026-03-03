@@ -198,6 +198,25 @@ class DroneMissionEnv(DroneHoverBaseEnv):
         return False
 
     # =====================================================
+    # Step override (done before reward)
+    # =====================================================
+
+    def step(self, action: np.ndarray) -> tuple:
+        """Step the simulation once forward with done-before-reward ordering."""
+        for _ in range(self.aggregate_phy_steps):
+            self.physics.step_forward(action)
+            self.compute_observation()
+            self.iteration += 1
+
+        next_obs = self.compute_history()
+        terminated = self.compute_done()
+        reward = self.compute_reward(action)
+        info = self.compute_info()
+        truncated = False
+        self.last_action = action
+        return next_obs, reward, terminated, truncated, info
+
+    # =====================================================
     # Reward (diagnostic only)
     # =====================================================
 
