@@ -1,0 +1,59 @@
+{
+    "ac_kwargs":	{
+        "pi":	{
+            "activation":	"relu",
+            "hidden_sizes":	[
+                128,
+                128
+            ]
+        },
+        "val":	{
+            "activation":	"tanh",
+            "hidden_sizes":	[
+                128,
+                128
+            ]
+        }
+    },
+    "actor":	"mlp",
+    "adv_estimation_method":	"gae",
+    "alg":	"ppo",
+    "check_freq":	25,
+    "entropy_coef":	0.02,
+    "epochs":	1,
+    "exp_name":	"TakeoffHover_AttitudeRate_round_1",
+    "gamma":	0.99,
+    "lam":	0.95,
+    "logger_kwargs":	{
+        "exp_name":	"TakeoffHover_AttitudeRate_round_1",
+        "level":	1,
+        "log_dir":	"C:\\Users\\Lawrence Wontumi\\Downloads\\AI-Powered-Resilient-UAV-Control\\runs\\TakeoffHover_AttitudeRate_round_1\\2026-03-24__14-39-49\\seed_00000",
+        "use_tensor_board":	true,
+        "verbose":	true
+    },
+    "max_ep_len":	1600,
+    "max_grad_norm":	0.5,
+    "num_mini_batches":	16,
+    "optimizer":	"Adam",
+    "pi_lr":	0.0003,
+    "save_freq":	10,
+    "seed":	0,
+    "steps_per_epoch":	1600,
+    "target_kl":	0.01,
+    "train_pi_iterations":	80,
+    "train_v_iterations":	5,
+    "trust_region":	"plain",
+    "use_entropy":	true,
+    "use_exploration_noise_anneal":	true,
+    "use_kl_early_stopping":	false,
+    "use_linear_lr_decay":	true,
+    "use_max_grad_norm":	false,
+    "use_reward_scaling":	true,
+    "use_shared_weights":	false,
+    "use_standardized_advantages":	false,
+    "use_standardized_obs":	true,
+    "verbose":	true,
+    "vf_lr":	0.001,
+    "video_freq":	-1,
+    "weight_initialization":	"kaiming_uniform"
+}

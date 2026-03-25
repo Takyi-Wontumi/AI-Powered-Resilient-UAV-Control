@@ -70,7 +70,7 @@ class DroneFollowPathEnv(DroneBaseEnv):
             self.drone.xyz_dot,
             self.drone.rpy_dot,
             pos_error
-        ])
+        ]).astype(np.float32)
 
         return obs
 
@@ -134,11 +134,18 @@ class DroneFollowPathEnv(DroneBaseEnv):
     # RESET BEHAVIOR
     # ===============================================================
     def task_specific_reset(self):
-        """Reset drone at height 1m with default orientation."""
+        """Reset drone on the active trajectory start state."""
+        pos0, _ = self.trajectory_fn(0.0)
+        pos0 = np.asarray(pos0, dtype=np.float32)
         self.bc.resetBasePositionAndOrientation(
             self.drone.body_unique_id,
-            posObj=np.array([0, 0, 1]),
+            posObj=pos0,
             ornObj=self.init_quaternion
+        )
+        self.bc.resetBaseVelocity(
+            self.drone.body_unique_id,
+            linearVelocity=np.zeros(3),
+            angularVelocity=np.zeros(3),
         )
 
 

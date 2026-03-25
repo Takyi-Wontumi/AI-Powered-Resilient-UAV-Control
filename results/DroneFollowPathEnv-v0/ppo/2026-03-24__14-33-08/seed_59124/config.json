@@ -1,0 +1,60 @@
+{
+    "ac_kwargs":	{
+        "pi":	{
+            "activation":	"relu",
+            "hidden_sizes":	[
+                50,
+                50
+            ]
+        },
+        "val":	{
+            "activation":	"tanh",
+            "hidden_sizes":	[
+                64,
+                64
+            ]
+        }
+    },
+    "actor":	"mlp",
+    "adv_estimation_method":	"gae",
+    "alg":	"ppo",
+    "check_freq":	25,
+    "entropy_coef":	0.01,
+    "env_id":	"DroneFollowPathEnv-v0",
+    "epochs":	1,
+    "exp_name":	"DroneFollowPathEnv-v0\\ppo",
+    "gamma":	0.99,
+    "lam":	0.95,
+    "logger_kwargs":	{
+        "exp_name":	"DroneFollowPathEnv-v0\\ppo",
+        "level":	1,
+        "log_dir":	"C:\\Users\\Lawrence Wontumi\\Downloads\\AI-Powered-Resilient-UAV-Control\\results\\DroneFollowPathEnv-v0\\ppo\\2026-03-24__14-33-08\\seed_59124",
+        "use_tensor_board":	true,
+        "verbose":	true
+    },
+    "max_ep_len":	200,
+    "max_grad_norm":	0.5,
+    "num_mini_batches":	16,
+    "optimizer":	"Adam",
+    "pi_lr":	0.0003,
+    "save_freq":	10,
+    "seed":	59124,
+    "steps_per_epoch":	400,
+    "target_kl":	0.01,
+    "train_pi_iterations":	80,
+    "train_v_iterations":	5,
+    "trust_region":	"plain",
+    "use_entropy":	false,
+    "use_exploration_noise_anneal":	true,
+    "use_kl_early_stopping":	false,
+    "use_linear_lr_decay":	true,
+    "use_max_grad_norm":	false,
+    "use_reward_scaling":	true,
+    "use_shared_weights":	false,
+    "use_standardized_advantages":	false,
+    "use_standardized_obs":	true,
+    "verbose":	true,
+    "vf_lr":	0.001,
+    "video_freq":	-1,
+    "weight_initialization":	"kaiming_uniform"
+}

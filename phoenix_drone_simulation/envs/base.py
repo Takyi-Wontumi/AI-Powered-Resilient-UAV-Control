@@ -316,7 +316,7 @@ class DroneBaseEnv(gym.Env, abc.ABC):
         action = self.drone.last_action
         self.action_history.append(action)
 
-        return history
+        return history.astype(np.float32)
 
     @abc.abstractmethod
     def compute_info(self) -> dict:
