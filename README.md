@@ -1,207 +1,160 @@
-# Phoenix-Drone-Simulation 
+# Phoenix-Drone-Simulation (Fork)
 
-This repository is a **fork** of [phoenix-drone-simulation](https://github.com/SvenGronauer/phoenix-drone-simulation) by **Sven Gronauer**.  
-It builds upon the original work to include additional control modules, trajectory tracking experiments, and new environment configurations.
+This repository is a fork of [SvenGronauer/phoenix-drone-simulation](https://github.com/SvenGronauer/phoenix-drone-simulation), extended for trajectory tracking, new environment configurations, and control experiments.
 
-
-An OpenAI [Gym environment](https://gym.openai.com/envs/#classic_control) based 
-on [PyBullet](https://github.com/bulletphysics/bullet3) for learning to control 
-the CrazyFlie quadrotor: 
-
-- Can be used for Reinforcement Learning (check out the examples!) or Model 
-  Predictive Control
-- We used this repository for sim-to-real transfer experiments (see publication [1] below)
-- The implemented dynamics model is based on the [Bitcraze's Crazyflie 2.1 nano-quadrotor](https://www.bitcraze.io/documentation/hardware/crazyflie_2_1/crazyflie_2_1-datasheet.pdf)
-
+It provides Gymnasium-compatible quadrotor simulation environments based on PyBullet, with dynamics modeled around the Bitcraze Crazyflie 2.1 nano quadrotor.
 
 Circle Task | TakeOff
---- |  ---
-![Circle](./docs/readme/circle3.gif) |![TakeOff](./docs/readme/takeoff.gif)
+--- | ---
+![Circle](./docs/readme/circle3.gif) | ![TakeOff](./docs/readme/takeoff.gif)
 
+## What This Fork Adds
 
-The following tasks are currently available to fly the little drone:
-- Hover
-- Circle 
-- Take-off *(implemented but not yet working properly: reward function must be tuned!)*
-- ~~Reach~~ (not yet implemented)
+- Additional trajectory-following environments (circle, square, helix, sine, hover path variants).
+- Custom mission and control experiments in `AI_UAV_Tests/`.
+- Integration-oriented scripts for PID + RL workflows.
+- Expanded experiment scripts for dropout/noise and trajectory tracking scenarios.
 
+## Available Environments
 
-## Overview of Environments
+### Core environments (registered on `import phoenix_drone_simulation`)
 
-|                                       | Task         | Controller    | Physics            | Observation Frequency | Domain Randomization |  *Aerodynamic effects*     |  Motor Dynamics   |
-|-------------------------------------: | :----------: | :-----------: | :----------------: | :-------------------: | :------------------: | :------------------------: | :---------------: | 
-| `DroneHoverSimpleEnv-v0`              | Hover        | PWM (100Hz)   | Simple             | 100 Hz                | 10%                  | None                        | Instant force     |
-| `DroneHoverBulletEnv-v0`              | Hover        | PWM (100Hz)   | PyBullet           | 100 Hz                | 10%                  | None                        | First-order       |
-| `DroneCircleSimpleEnv-v0`             | Circle       | PWM (100Hz)   | Simple             | 100 Hz                | 10%                  | None                        | Instant force     |
-| `DroneCircleBulletEnv-v0`             | Circle       | PWM (100Hz)   | PyBullet           | 100 Hz                | 10%                  | None                        | First-order     |
-| `DroneTakeOffSimpleEnv-v0`             | Take-off     | PWM (100Hz)   | Simple             | 100 Hz                | 10%                  | Ground-effect              | Instant force     |
-| `DroneTakeOffBulletEnv-v0`             | Take-off     | PWM (100Hz)   | PyBullet           | 100 Hz                | 10%                  | Ground-effect              | First-order     |
+| Environment ID | Task | Physics |
+|---|---|---|
+| `DroneHoverSimpleEnv-v0` | Hover | Simple |
+| `DroneHoverBulletEnv-v0` | Hover | PyBullet |
+| `DroneCircleSimpleEnv-v0` | Circle | Simple |
+| `DroneCircleBulletEnv-v0` | Circle | PyBullet |
+| `DroneTakeOffSimpleEnv-v0` | Take-off | Simple |
+| `DroneTakeOffBulletEnv-v0` | Take-off | PyBullet |
 
-# Installation and Requirements
+### Fork trajectory environments (registered via `register_all_envs()`)
 
-Here are the (few) steps to follow to get our repository ready to run. Clone the
-repository and install the phoenix-drone-simulation package via pip. Note that 
-everything after a `$` is entered on a terminal, while everything after `>>>` 
-is passed to a Python interpreter. Please, use the following three steps for 
-installation:
-```
-$ git clone https://github.com/SvenGronauer/phoenix-drone-simulation
-$ cd phoenix-drone-simulation/
-$ pip install -e .
-```
+| Environment ID | Trajectory |
+|---|---|
+| `DroneFollowPathEnv-v0` | Circle default |
+| `DroneHoverEnv-v0` | Hover |
+| `DroneSquareEnv-v0` | Square |
+| `DroneHelixEnv-v0` | Helix |
+| `DroneSineEnv-v0` | Sine |
 
-This package follows OpenAI's [Gym Interface](https://github.com/openai/gym/blob/master/docs/creating-environments.md).
+## Installation
 
-> Note: if your default `python` is 2.7, in the following, replace `pip` with `pip3` and `python` with `python3`
+### 1. Clone this fork (not upstream)
 
-
-## Supported Systems
-
-We tested this package under *Ubuntu 20.04* and *Mac OS X 11.2* running Python 
-3.7 and 3.8. Other system might work as well but have not been tested yet.
-Note that PyBullet supports Windows as platform only experimentally!. 
-
-
-## Dependencies 
-
-Bullet-Safety-Gym heavily depends on two packages:
-
-+ [Gym](https://github.com/openai/gym)
-+ [PyBullet](https://github.com/bulletphysics/bullet3)
-
-
-## Getting Started
-
-
-After the successful installation of the repository, the Bullet-Safety-Gym 
-environments can be simply instantiated via `gym.make`. See: 
-
-```
->>> import gymnasium as gym
->>> import phoenix_drone_simulation
->>> env = gym.make('DroneHoverBulletEnv-v0')
+```bash
+git clone https://github.com/Takyi-Wontumi/AI-Powered-Resilient-UAV-Control.git
+cd AI-Powered-Resilient-UAV-Control
 ```
 
-The functional interface follows the API of the OpenAI Gym (Brockman et al., 
-2016) that consists of the three following important functions:
+### 2. Create and activate a virtual environment (recommended)
 
-```
->>> observation, info = env.reset()
->>> random_action = env.action_space.sample()  # usually the action is determined by a policy
->>> next_observation, reward, terminated, truncated, info = env.step(random_action)
+Windows (PowerShell):
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 ```
 
-A minimal code for visualizing a uniformly random policy in a GUI, can be seen 
-in:
+Linux/macOS:
 
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 ```
+
+### 3. Install package dependencies
+
+```bash
+pip install -e .
+```
+
+## Quick Start
+
+### Create and step a basic environment
+
+```python
 import gymnasium as gym
-import time
 import phoenix_drone_simulation
 
-env = gym.make('DroneHoverBulletEnv-v0', render_mode="human")
-
-while True:
-    done = False
-    x, _ = env.reset()
-    while not done:
-        random_action = env.action_space.sample()
-        x, reward, terminated, truncated, info = env.step(random_action)
-        done = terminated or truncated
-        time.sleep(0.05)
-```
-Note that only calling the render function before the reset function triggers 
-visuals.
-
-# Training Policies
-
-To train an agent with the PPO algorithm call:
-```
-$ python -m phoenix_drone_simulation.train --alg ppo --env DroneHoverBulletEnv-v0
+env = gym.make("DroneHoverBulletEnv-v0")
+obs, info = env.reset()
+action = env.action_space.sample()
+obs, reward, terminated, truncated, info = env.step(action)
 ```
 
-This works with basically every environment that is compatible with the OpenAI 
-Gym interface:
+### Use fork-specific trajectory environments
+
+```python
+import gymnasium as gym
+import phoenix_drone_simulation
+from phoenix_drone_simulation.envs.register_envs import register_all_envs
+
+register_all_envs()
+env = gym.make("DroneSquareEnv-v0")
 ```
-$ python -m phoenix_drone_simulation.train --alg ppo --env Pendulum-v1
+
+## Training
+
+Train PPO on a standard hover task:
+
+```bash
+python -m phoenix_drone_simulation.train --alg ppo --env DroneHoverBulletEnv-v0
 ```
 
-After an RL model has been trained and its checkpoint has been saved on your 
-disk, you can visualize the checkpoint:
+Train PPO on this fork's path-following environment:
+
+```bash
+python -m phoenix_drone_simulation.train --alg ppo --env DroneFollowPathEnv-v0 --no-mpi
 ```
-$ python -m phoenix_drone_simulation.play --ckpt PATH_TO_CKPT
+
+Notes:
+
+- Supported algorithms in this codebase include `ppo`, `trpo`, `npg`, and `iwpg`.
+- Use `--no-mpi` if MPI is not configured on your machine.
+
+## Playback
+
+Run a saved checkpoint:
+
+```bash
+python -m phoenix_drone_simulation.play --ckpt PATH_TO_CKPT
 ```
-where PATH_TO_CKPT is the path to the checkpoint, e.g.
-`/var/tmp/sven/DroneHoverSimpleEnv-v0/trpo/2021-11-16__16-08-09/seed_51544`
 
-# Examples
+Run a random policy in an environment:
 
-### `generate_trajectories.py`
+```bash
+python -m phoenix_drone_simulation.play --env DroneSquareEnv-v0 --random
+```
 
-See the `generate_trajectories.py` script which shows how to generate data 
-batches of size N. Use `generate_trajectories.py --play` to visualize the policy
-in PyBullet simulator. 
+## Useful Example Scripts
 
-### `train_drone_hover.py`
+- `examples/train_drone_hover.py`
+- `examples/train_takeoff_hover.py`
+- `examples/train_mission_trajectory.py`
+- `examples/follow_path_test.py`
+- `examples/follow_path_dropout_mission.py`
+- `examples/generate_trajectories.py`
 
-Use Reinforcement Learning (RL) to learn the drone holding its position at (0, 0, 1). 
-This canonical example relies on the [RL-safety-Algorithms](https://github.com/SvenGronauer/RL-Safety-Algorithms) 
-repository which is a very strong framework for parallel RL algorithm training.
- 
-### `transfer_learning_drone_hover.py`
+## Requirements
 
-Shows a transfer learning approach. We first train a PPO model in the source domain 
-`DroneHoverSimpleEnv-v0` and then re-train the model on a more complex target 
-domain `DroneHoverBulletEnv-v0`.
-Note that the `DroneHoverBulletEnv-v0` environment builds upon an accurate 
-motor modelling of the CrazyFlie drone and includes a motor dead time as well as
-a motor lag.
+The package currently declares (via `setup.py`):
 
+- Python `>=3.8`
+- `gymnasium>=0.29.1`
+- `pybullet`
+- `torch`
+- `numpy==1.24.4`
+- `scipy`, `matplotlib`, `pandas`, `tensorboard`, `mpi4py`, `joblib`, `psutil`
 
-# Tools
+## Upstream Publication
 
-- `convert.py` @ Sven Gronauer
+Sven Gronauer, Matthias Kissel, Luca Sacchetto, Mathias Korte, Klaus Diepold.  
+Using Simulation Optimization to Improve Zero-shot Policy Transfer of Quadrotors.  
+https://arxiv.org/abs/2201.01369
 
-A function used by Sven to extract the policy networks from
-his trained Actor Critic module and convert the model to a json file format.
+## Acknowledgements
 
-
-
-# Version History and Changes
-
-
-| Version |                                        Changes                                         |    Date    |
-|--------:|:--------------------------------------------------------------------------------------:|:----------:|
-|    v1.1 |                       Migrated from `gym==0.20.0` to `gymnasium`                        | 05.12.2023 | 
-|    v1.0 |         *Public Release*: Simulation parameters as proposed in Publication [1]         | 19.04.2022 | 
-|    v0.2 |        Add: accurate motor dynamic model and first real-world transfer insights        | 21.09.2021 | 
-|    v0.1 |              Re-factor: of repository  (only Hover task yet implemented)               | 18.05.2021 | 
-|    v0.0 | Fork: from [Gym-PyBullet-Drones Repo](https://github.com/utiasDSL/gym-pybullet-drones) | 01.12.2020 | 
-
-
-# Publications
-
-1.  Using Simulation Optimization to Improve Zero-shot Policy Transfer of Quadrotors
-    
-    *Sven Gronauer, Matthias Kissel, Luca Sacchetto, Mathias Korte, Klaus Diepold*
-    
-    https://arxiv.org/abs/2201.01369
-
-
-
------
-Lastly, we want to thank:
-- Jacopo Panerati and his team for contributing the [Gym-PyBullet-Drones Repo](https://github.com/utiasDSL/gym-pybullet-drones) 
-  which was the staring point for this repository.
-
-- Artem Molchanov and collaborators for their hints about the CrazyFlie Firmware and the motor dynamics in their paper "Sim-to-(Multi)-Real: Transfer of Low-Level Robust Control Policies to Multiple Quadrotors"
-
-- Jakob Foerster for this Bachelor Thesis and his insights about the CrazyFlie's parameter values
-
-
-
------
-This repository has been develepod at the
-> [Chair of Data Processing](https://www.ce.cit.tum.de/en/ldv/homepage/)             
-> TUM School of Computation, Information and Technology                    
-> Technical University of Munich        
+- Upstream project by Sven Gronauer and contributors.
+- Gym-PyBullet-Drones contributors for foundational simulation work.
+- Bitcraze ecosystem and Crazyflie community for hardware and modeling references.

@@ -28,6 +28,7 @@ from phoenix_drone_simulation.utils import utils
 from phoenix_drone_simulation.utils.loggers import setup_logger_kwargs
 from phoenix_drone_simulation.algs import core
 from AI_UAV_Tests.trajectories_library import Trajectories as T
+from AI_UAV_Tests.trajectories_library import FlightMission
 
 
 # ---------------------------------------------------------
@@ -39,7 +40,26 @@ TRAJ_MAP = {
     "helix": T.helix_traj,
     "sine": T.sine_traj,
     "hover": T.hover_traj,
+    # Placeholder to expose this option in argparse / checkpoint parsing.
+    "flight_mission": T.hover_traj,
 }
+
+
+def _build_user_flight_mission():
+    """Builds the exact mission requested by the user."""
+    mission = FlightMission(default_z=1.0, ground_z=0.0)
+    mission.add_takeoff(duration=3.0, target_z=1.0)
+    mission.add_circle(duration=12.0, radius=1.0, period=12.0, z=1.0, center_xy=(-1.0, 0.0))
+    mission.add_hover(duration=2.0, z=1.0)
+    mission.add_point(duration=2.0, target=(-0.5, -0.5, 1.0))
+    mission.add_square(duration=12.0, side=1.0, period=12.0, z=1.0, offset_xy=(-0.5, -0.5))
+    mission.add_hover(duration=2.0, z=1.0)
+    mission.add_landing(duration=4.0, ground_z=0.075)
+    mission.add_hover(duration=1.0, z=0.075)
+    mission.add_takeoff(duration=12.0, target_z=5.0)
+    mission.add_hover(duration=3.0, z=5.0)
+    mission.add_landing(duration=12.0, ground_z=0.055)
+    return mission
 
 
 def _make_traj_fn(traj_name: str, args):
@@ -55,6 +75,14 @@ def _make_traj_fn(traj_name: str, args):
     elif traj_name == "hover":
         def base_fn(t):
             return T.hover_traj(t, pos=(0.0, 0.0, args.traj_z))
+    elif traj_name == "flight_mission":
+        mission = _build_user_flight_mission()
+
+        def base_fn(t):
+            return mission(t)
+
+        # Mission already includes explicit takeoff/hover/landing phases.
+        return base_fn
     else:
         base_fn = TRAJ_MAP[traj_name]
 
