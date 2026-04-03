@@ -209,7 +209,7 @@ def main():
         parser.error("--preflight-only requires preflight to be enabled. Use --preflight.")
 
     # -----------------------------------------------------
-    # Mission plan (built once)
+    # PS: This is the mission plan section where you can customize the trajectory. The wrong parameters here can lead to a more aggressive or more gentle mission. For example, increasing the circle/square period will make the drone move slower along those paths, while decreasing the period will make it faster. Adjust these parameters to find a good balance for your testing! The mission summary will print out the total time and phase breakdown for reference.
     # -----------------------------------------------------
     mission_plan = FlightMission(default_z=1.0, ground_z=0.0)
     mission_plan.add_takeoff(duration=3.0, target_z=1.0)
