@@ -61,6 +61,12 @@ python examples\follow_path_dropout_mission_3.py --preflight-mode kinematic --pr
 
 # Physics preflight with custom sampling and speed limits
 python examples\follow_path_dropout_mission_3.py --preflight-mode physics --preflight-hz 60 --xy-speed-limit 0.8 --min-z-ref 0.3
+
+# Record MP4 from this mission script
+python examples\follow_path_dropout_mission_3.py --record-mp4 "docs/readme/follow_path_dropout_mission_3.mp4"
+
+# Record GIF from this mission script
+python examples\follow_path_dropout_mission_3.py --record-gif "docs/readme/follow_path_dropout_mission_3.gif" --gif-fps 20 --gif-frame-skip 2
 ```
 
 Mission runtime keyboard controls in this family of scripts:
@@ -74,6 +80,7 @@ Mission runtime keyboard controls in this family of scripts:
 ## 4. Core Follow-Path / Mission Scripts
 
 ```powershell
+python examples\fly_with_obstacle.py
 python examples\follow_path_test.py
 python examples\follow_path_test_2.py
 python examples\follow_path_dropout.py
@@ -87,6 +94,7 @@ python examples\follow_path_dropout_noise.py
 
 Notes:
 
+- `fly_with_obstacle.py` spawns a static box in 3D and flies a mission around it.
 - `follow_path_dropout_mission_noise_log.py` writes CSV logs for analysis.
 - Some behavior is configured directly inside script mission definitions.
 
@@ -176,9 +184,29 @@ Notes:
 python examples\hover_with_attitude_PD.py
 python examples\hover_with_attitude_PID.py
 python examples\takeoff_with_attitude_rate_PID.py
+python examples\analyze_hover_motor_forces.py
 ```
 
-## 9. Troubleshooting
+## 9. Record GIF Previews
+
+You can record rollouts directly to GIF for docs and README previews.
+
+```powershell
+# Random policy GIF from an environment
+python examples\record_simulation_gif.py --env DroneHoverBulletEnv-v0 --episodes 1 --max-steps 400 --frame-skip 2 --fps 20 --out "docs/readme/hover_random.gif"
+
+# Trained mission checkpoint GIF
+python examples\record_simulation_gif.py --ckpt "runs\Mission_flight_mission_PWM\2026-03-25__14-25-41\seed_00000" --traj flight_mission --control-mode PWM --episodes 1 --max-steps 500 --frame-skip 2 --fps 20 --out "docs/readme/mission_pwm.gif"
+```
+
+Useful GIF options:
+
+- `--renderer tiny` (default, robust for most setups)
+- `--width`, `--height`
+- `--camera-distance`, `--camera-yaw`, `--camera-pitch`
+- `--fps`, `--frame-skip`
+
+## 10. Troubleshooting
 
 - If import errors appear, activate environment and run `pip install -e .` again.
 - If PyBullet GUI does not open, verify graphics drivers and avoid remote/headless sessions.

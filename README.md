@@ -93,7 +93,7 @@ obs, _ = env.reset()
 
 ## 5. Run PID / Baseline Control First
 
-Before RL, verify that baseline control is stable.
+Before RL, verify that baseline control is stable. Go to /examples to run code that uses the baseline PID control
 
 Run:
 

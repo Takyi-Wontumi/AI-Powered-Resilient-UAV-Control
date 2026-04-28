@@ -36,8 +36,8 @@ class QuadcopterPID:
         # -----------------------------
         # XY Position PD
         # -----------------------------
-        self.Kp_xy = np.array([8, 8])
-        self.Kd_xy = np.array([15, 15])
+        self.Kp_xy = np.array([5, 5])
+        self.Kd_xy = np.array([3, 3])
 
         # -----------------------------
         # Altitude PID
@@ -52,7 +52,7 @@ class QuadcopterPID:
         # Attitude PID
         # -----------------------------
         self.Kp_att = np.array([8.0, 8.0, 4.0])
-        self.Ki_att = np.array([1.0, 1.0, 0.5])
+        self.Ki_att = np.array([3.0, 3.0, 0.5])
         self.att_int = np.zeros(3)
         self.att_int_limit = np.array([0.3, 0.3, 0.3])
 
@@ -205,12 +205,13 @@ class QuadcopterPID:
         tau_phi, tau_theta, tau_psi = tau
         u = np.array([U1, tau_phi, tau_theta, tau_psi])
 
-        thrusts = self.M_inv @ u
-        thrusts = np.clip(thrusts, 0, np.inf)
-
-        omega_sq = thrusts / self.b
+        omega_sq = self.M_inv @ u
+        omega_sq = np.clip(omega_sq, 0, np.inf)
         omega_sq = np.clip(omega_sq, 0, self.max_omega**2)
         return np.sqrt(omega_sq)
+
+    def motor_forces(self, omega):
+        return self.b * np.asarray(omega, dtype=float) ** 2
 
     # =========================================================
     # Dynamics (for standalone sim)
@@ -271,6 +272,7 @@ class QuadcopterPID:
 
         # Mixer → motor speeds
         omega = self.mixer(U1, tau)
+        motor_forces = self.motor_forces(omega)
 
         # =====================================================
         #  CASE 1: Phoenix is controlling physics
@@ -279,7 +281,9 @@ class QuadcopterPID:
             return {
                 "rates_des": rates_des,
                 "thrust_cmd": U1,
+                "tau_cmd": tau,
                 "omega_cmd": omega,
+                "motor_forces": motor_forces,
                 "x": self.x,
                 "v": self.v,
                 "ang": self.ang,
@@ -314,7 +318,9 @@ class QuadcopterPID:
         return {
             "rates_des": rates_des,
             "thrust_cmd": U1,
+            "tau_cmd": tau,
             "omega_cmd": omega,
+            "motor_forces": motor_forces,
             "x": self.x,
             "v": self.v,
             "ang": self.ang,

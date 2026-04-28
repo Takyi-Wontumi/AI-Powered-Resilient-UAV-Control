@@ -13,6 +13,7 @@ import time
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+import imageio.v2 as imageio
 
 # ---------------------------------------------------------
 # Path setup
@@ -56,6 +57,20 @@ def termination_reason(env: DroneMissionEnv) -> str:
     return "terminated by environment"
 
 
+def safe_disconnect_env(env):
+    if env is None:
+        return
+    try:
+        if hasattr(env, "bc") and env.bc is not None:
+            env.bc.disconnect()
+    except Exception:
+        pass
+    try:
+        env.close()
+    except Exception:
+        pass
+
+
 def run_physics_preflight(
     mission_plan: FlightMission,
     speedup: float,
@@ -96,68 +111,96 @@ def run_physics_preflight(
     print("-" * len(table_header))
 
     prev_pos = None
-    for k in range(steps):
-        time.sleep(max(0.0, dt / max(speedup, 1e-6)))
-        env.mission_time += dt
-        t = env.mission_time
+    try:
+        for k in range(steps):
+            time.sleep(max(0.0, dt / max(speedup, 1e-6)))
+            env.mission_time += dt
+            t = env.mission_time
 
-        x = env.drone.xyz
-        v = env.drone.xyz_dot
-        ang = env.drone.rpy
-        rate = env.drone.rpy_dot
+            x = env.drone.xyz
+            v = env.drone.xyz_dot
+            ang = env.drone.rpy
+            rate = env.drone.rpy_dot
 
-        phase_name = mission_plan.phase_name_at(t)
-        pos_ref, vel_ref = mission_plan(t)
-        pos_ref = np.asarray(pos_ref, dtype=float).copy()
-        vel_ref = np.asarray(vel_ref, dtype=float).copy()
+            phase_name = mission_plan.phase_name_at(t)
+            pos_ref, vel_ref = mission_plan(t)
+            pos_ref = np.asarray(pos_ref, dtype=float).copy()
+            vel_ref = np.asarray(vel_ref, dtype=float).copy()
 
-        if phase_name != "landing":
-            pos_ref[2] = max(float(pos_ref[2]), float(min_z_ref))
-        xy_norm = float(np.linalg.norm(vel_ref[:2]))
-        if xy_norm > float(xy_speed_limit):
-            vel_ref[:2] *= float(xy_speed_limit) / max(xy_norm, 1e-9)
+            if phase_name != "landing":
+                pos_ref[2] = max(float(pos_ref[2]), float(min_z_ref))
+            xy_norm = float(np.linalg.norm(vel_ref[:2]))
+            if xy_norm > float(xy_speed_limit):
+                vel_ref[:2] *= float(xy_speed_limit) / max(xy_norm, 1e-9)
 
-        env.set_target(pos_ref)
+            env.set_target(pos_ref)
 
-        quad.inject_external_state(x, v, ang, rate)
-        z_ref = env.get_mission_reference()[2]
-        ctrl = quad.step(pos_ref, vel_ref, z_ref=z_ref)
-        rates_des = ctrl["rates_des"]
-        U1 = ctrl["thrust_cmd"]
+            quad.inject_external_state(x, v, ang, rate)
+            z_ref = env.get_mission_reference()[2]
+            ctrl = quad.step(pos_ref, vel_ref, z_ref=z_ref)
+            rates_des = ctrl["rates_des"]
+            U1 = ctrl["thrust_cmd"]
 
-        action = np.zeros(4, dtype=np.float32)
-        action[0] = thrust_to_action(U1, quad.m, quad.g)
-        action[1:4] = np.clip(rates_des / (np.pi / 3.0), -1.0, 1.0)
+            action = np.zeros(4, dtype=np.float32)
+            action[0] = thrust_to_action(U1, quad.m, quad.g)
+            action[1:4] = np.clip(rates_des / (np.pi / 3.0), -1.0, 1.0)
 
-        obs, reward, done, truncated, info = env.step(action)
+            obs, reward, done, truncated, info = env.step(action)
 
-        if prev_pos is not None:
-            line_color = mission_plan.trail_color_at_time(t=t, dropout_active=False)
-            env.bc.addUserDebugLine(
-                prev_pos.tolist(),
-                x.tolist(),
-                lineColorRGB=line_color,
-                lineWidth=2.0,
-                lifeTime=0.0,
-            )
-        prev_pos = x.copy()
+            if prev_pos is not None:
+                line_color = mission_plan.trail_color_at_time(t=t, dropout_active=False)
+                env.bc.addUserDebugLine(
+                    prev_pos.tolist(),
+                    x.tolist(),
+                    lineColorRGB=line_color,
+                    lineWidth=2.0,
+                    lifeTime=0.0,
+                )
+            prev_pos = x.copy()
 
-        if k % 10 == 0:
-            _, phase_elapsed, phase_total = mission_plan.phase_info_at(t)
-            print(
-                f"{k:6d}  {phase_name:<10}  {phase_elapsed:5.2f}/{phase_total:5.2f}  "
-                f"{t:6.2f}/{mission_plan.total_time:6.2f}  {np.linalg.norm(v):10.3f}  "
-                f"{x[0]:8.3f}  {x[1]:8.3f}  {x[2]:8.3f}  {'physics':<10}"
-            )
+            if k % 10 == 0:
+                _, phase_elapsed, phase_total = mission_plan.phase_info_at(t)
+                print(
+                    f"{k:6d}  {phase_name:<10}  {phase_elapsed:5.2f}/{phase_total:5.2f}  "
+                    f"{t:6.2f}/{mission_plan.total_time:6.2f}  {np.linalg.norm(v):10.3f}  "
+                    f"{x[0]:8.3f}  {x[1]:8.3f}  {x[2]:8.3f}  {'physics':<10}"
+                )
 
-        if done:
-            print(f"Physics preflight terminated: {termination_reason(env)}")
-            env.close()
-            return False
+            if done:
+                print(f"Physics preflight terminated: {termination_reason(env)}")
+                return False
 
-    print("Physics preflight completed.")
-    env.close()
-    return True
+        print("Physics preflight completed.")
+        return True
+    finally:
+        safe_disconnect_env(env)
+
+
+def capture_camera_frame(env, width, height, distance, yaw, pitch, fov):
+    target = np.asarray(env.drone.xyz, dtype=float).tolist()
+    view_matrix = env.bc.computeViewMatrixFromYawPitchRoll(
+        cameraTargetPosition=target,
+        distance=float(distance),
+        yaw=float(yaw),
+        pitch=float(pitch),
+        roll=0.0,
+        upAxisIndex=2,
+    )
+    proj_matrix = env.bc.computeProjectionMatrixFOV(
+        fov=float(fov),
+        aspect=float(width) / float(height),
+        nearVal=0.01,
+        farVal=100.0,
+    )
+    _, _, rgba, _, _ = env.bc.getCameraImage(
+        width=int(width),
+        height=int(height),
+        viewMatrix=view_matrix,
+        projectionMatrix=proj_matrix,
+        renderer=env.bc.ER_TINY_RENDERER,
+    )
+    frame = np.reshape(rgba, (int(height), int(width), 4))[:, :, :3]
+    return frame.astype(np.uint8)
 
 
 # =========================================================
@@ -198,6 +241,16 @@ def main():
         default=0.25,
         help="Minimum z reference outside landing [m]",
     )
+    parser.add_argument("--record-mp4", type=str, default=None, help="Optional MP4 output path from PyBullet.")
+    parser.add_argument("--record-gif", type=str, default=None, help="Optional GIF output path.")
+    parser.add_argument("--gif-fps", type=int, default=20, help="GIF playback FPS.")
+    parser.add_argument("--gif-frame-skip", type=int, default=2, help="Capture every N simulation steps.")
+    parser.add_argument("--gif-width", type=int, default=640, help="GIF frame width.")
+    parser.add_argument("--gif-height", type=int, default=360, help="GIF frame height.")
+    parser.add_argument("--gif-camera-distance", type=float, default=2.0, help="Camera distance for GIF capture.")
+    parser.add_argument("--gif-camera-yaw", type=float, default=45.0, help="Camera yaw for GIF capture.")
+    parser.add_argument("--gif-camera-pitch", type=float, default=-30.0, help="Camera pitch for GIF capture.")
+    parser.add_argument("--gif-fov", type=float, default=60.0, help="Camera FOV for GIF capture.")
     args = parser.parse_args()
     if not (1.0 <= args.preflight_speed <= 5.0):
         parser.error("--preflight-speed must be between 1 and 5.")
@@ -207,6 +260,12 @@ def main():
         parser.error("--min-z-ref must be >= 0.")
     if args.preflight_only and not args.preflight:
         parser.error("--preflight-only requires preflight to be enabled. Use --preflight.")
+    if args.gif_fps <= 0:
+        parser.error("--gif-fps must be > 0.")
+    if args.gif_frame_skip <= 0:
+        parser.error("--gif-frame-skip must be > 0.")
+    if args.gif_width <= 0 or args.gif_height <= 0:
+        parser.error("--gif-width and --gif-height must be > 0.")
 
     # -----------------------------------------------------
     # PS: This is the mission plan section where you can customize the trajectory. The wrong parameters here can lead to a more aggressive or more gentle mission. For example, increasing the circle/square period will make the drone move slower along those paths, while decreasing the period will make it faster. Adjust these parameters to find a good balance for your testing! The mission summary will print out the total time and phase breakdown for reference.
@@ -215,13 +274,6 @@ def main():
     mission_plan.add_takeoff(duration=3.0, target_z=1.0)
     mission_plan.add_circle(duration=12.0, radius=1.0, period=12.0, z=1.0, center_xy=(-1.0, 0.0))  # 1 full loop
     mission_plan.add_hover(duration=2.0, z=1.0)
-    mission_plan.add_point(duration=2.0, target=(-0.5, -0.5, 1.0))
-    mission_plan.add_square(duration=12.0, side=1.0, period=12.0, z=1.0, offset_xy=(-0.5, -0.5))  # 1 full loop
-    mission_plan.add_hover(duration=2.0, z=1.0)
-    mission_plan.add_landing(duration=4.0, ground_z=0.075)
-    mission_plan.add_hover(duration=1.0, z=0.075)
-    mission_plan.add_takeoff(duration=12.0, target_z=5.0)
-    mission_plan.add_hover(duration=3.0, z=5.0)
     mission_plan.add_landing(duration=12.0, ground_z=0.055)
 
     if args.preflight:
@@ -241,6 +293,7 @@ def main():
                 xy_speed_limit=args.xy_speed_limit,
                 min_z_ref=args.min_z_ref,
             )
+            time.sleep(0.2)
         elif not args.preflight_dashboard:
             print("Kinematic preflight selected with --no-preflight-dashboard; skipping preflight window.")
     if args.preflight_only:
@@ -265,6 +318,14 @@ def main():
     )
 
     obs, info = env.reset()  # ONE TIME ONLY
+    gif_frames = []
+    video_log_id = None
+    if args.record_mp4:
+        mp4_dir = os.path.dirname(args.record_mp4)
+        if mp4_dir:
+            os.makedirs(mp4_dir, exist_ok=True)
+        video_log_id = env.bc.startStateLogging(env.bc.STATE_LOGGING_VIDEO_MP4, args.record_mp4)
+        print(f"Recording MP4 to: {args.record_mp4}")
 
     # -----------------------------------------------------
     # Controller
@@ -401,6 +462,18 @@ def main():
         log_ref.append(pos_ref.copy())
         log_speed.append(float(np.linalg.norm(v)))
         log_dropout.append(bool(env.dropout_mgr.active))
+        if args.record_gif and (k % int(args.gif_frame_skip) == 0):
+            gif_frames.append(
+                capture_camera_frame(
+                    env=env,
+                    width=args.gif_width,
+                    height=args.gif_height,
+                    distance=args.gif_camera_distance,
+                    yaw=args.gif_camera_yaw,
+                    pitch=args.gif_camera_pitch,
+                    fov=args.gif_fov,
+                )
+            )
 
         # Dashboard (table rows)
         if k % 10 == 0:
@@ -418,7 +491,20 @@ def main():
             print(f"Mission terminated: {termination_reason(env)}")
             break
 
-    env.close()
+    if video_log_id is not None:
+        env.bc.stopStateLogging(video_log_id)
+        print("Stopped MP4 recording.")
+
+    safe_disconnect_env(env)
+    if args.record_gif:
+        gif_dir = os.path.dirname(args.record_gif)
+        if gif_dir:
+            os.makedirs(gif_dir, exist_ok=True)
+        if len(gif_frames) > 0:
+            imageio.mimsave(args.record_gif, gif_frames, fps=int(args.gif_fps), loop=0)
+            print(f"Saved GIF to: {args.record_gif} ({len(gif_frames)} frames)")
+        else:
+            print("GIF recording requested, but no frames were captured.")
 
     # End-of-run stability plots (XYZ vs time)
     if len(log_t) > 0:
