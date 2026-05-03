@@ -64,42 +64,43 @@ class QuadcopterEKF:
         self.sigma_gyro = sigma_gyro
 
         if process_noise_diag is None:
-            # EMPIRICALLY TUNED (q_scale=0.0801, 1.15x baseline)
-            # Increase process noise to make filter trust model less
+            # EMPIRICALLY TUNED (q_scale=0.0750, 1.076x baseline)
+            # Conservative increase to process noise
             process_noise_diag = np.array(
                 [
-                    1.0e-4 * 0.0801,
-                    1.0e-4 * 0.0801,
-                    1.0e-4 * 0.0801,
-                    5.0e-3 * 0.0801,
-                    5.0e-3 * 0.0801,
-                    5.0e-3 * 0.0801,
-                    1.0e-3 * 0.0801,
-                    1.0e-3 * 0.0801,
-                    1.0e-3 * 0.0801,
-                    2.0e-2 * 0.0801,
-                    2.0e-2 * 0.0801,
-                    2.0e-2 * 0.0801,
+                    1.0e-4 * 0.0750,
+                    1.0e-4 * 0.0750,
+                    1.0e-4 * 0.0750,
+                    5.0e-3 * 0.0750,
+                    5.0e-3 * 0.0750,
+                    5.0e-3 * 0.0750,
+                    1.0e-3 * 0.0750,
+                    1.0e-3 * 0.0750,
+                    1.0e-3 * 0.0750,
+                    2.0e-2 * 0.0750,
+                    2.0e-2 * 0.0750,
+                    2.0e-2 * 0.0750,
                 ],
                 dtype=float,
             )
 
         if measurement_noise_diag is None:
-            # EMPIRICALLY TUNED (baseline r_scale=0.1333)
+            # EMPIRICALLY TUNED (r_scale=0.1430, 1.073x baseline)
+            # Conservative increase to measurement noise
             measurement_noise_diag = np.array(
                 [
-                    5.0e-3 * 0.1333,
-                    5.0e-3 * 0.1333,
-                    5.0e-3 * 0.1333,
-                    2.0e-2 * 0.1333,
-                    2.0e-2 * 0.1333,
-                    2.0e-2 * 0.1333,
-                    5.0e-3 * 0.1333,
-                    5.0e-3 * 0.1333,
-                    5.0e-3 * 0.1333,
-                    2.0e-2 * 0.1333,
-                    2.0e-2 * 0.1333,
-                    2.0e-2 * 0.1333,
+                    5.0e-3 * 0.1430,
+                    5.0e-3 * 0.1430,
+                    5.0e-3 * 0.1430,
+                    2.0e-2 * 0.1430,
+                    2.0e-2 * 0.1430,
+                    2.0e-2 * 0.1430,
+                    5.0e-3 * 0.1430,
+                    5.0e-3 * 0.1430,
+                    5.0e-3 * 0.1430,
+                    2.0e-2 * 0.1430,
+                    2.0e-2 * 0.1430,
+                    2.0e-2 * 0.1430,
                 ],
                 dtype=float,
             )
