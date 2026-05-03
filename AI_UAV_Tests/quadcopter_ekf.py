@@ -26,6 +26,10 @@ VEL_IDX = slice(3, 6)
 ANG_IDX = slice(6, 9)
 RATE_IDX = slice(9, 12)
 
+# Module-level dropout Q profile (used when GPS drops out)
+DROPOUT_Q_DIAG = np.array([5e-4, 5e-4, 5e-4, 5e-4, 5e-4, 5e-4,
+                            4e-8, 4e-8, 4e-8, 5e-4, 5e-4, 5e-4])
+
 
 @dataclass(frozen=True)
 class QuadcopterPhysicalParams:
@@ -49,46 +53,61 @@ class QuadcopterEKF:
         process_noise_diag: Sequence[float] | None = None,
         measurement_noise_diag: Sequence[float] | None = None,
         initial_cov_diag: Sequence[float] | None = None,
+        adapt_noise: bool = False,
+        sigma_acc: float = 0.008,
+        sigma_gyro: float = 0.0005,
     ):
         self.dt = float(dt)
         self.params = params or QuadcopterPhysicalParams()
+        self.adapt_noise = adapt_noise
+        self.sigma_acc = sigma_acc
+        self.sigma_gyro = sigma_gyro
 
         if process_noise_diag is None:
+            # EMPIRICALLY TUNED (1.01x option B)
+            # This works because it's fitted to actual PyBullet behavior
+            # TODO: Replace with structured Q = G @ Qc @ G.T once dynamics are validated
             process_noise_diag = np.array(
                 [
-                    1.0e-4,
-                    1.0e-4,
-                    1.0e-4,
-                    5.0e-3,
-                    5.0e-3,
-                    5.0e-3,
-                    1.0e-3,
-                    1.0e-3,
-                    1.0e-3,
-                    2.0e-2,
-                    2.0e-2,
-                    2.0e-2,
+                    1.0e-4 * 0.0697,
+                    1.0e-4 * 0.0697,
+                    1.0e-4 * 0.0697,
+                    5.0e-3 * 0.0697,
+                    5.0e-3 * 0.0697,
+                    5.0e-3 * 0.0697,
+                    1.0e-3 * 0.0697,
+                    1.0e-3 * 0.0697,
+                    1.0e-3 * 0.0697,
+                    2.0e-2 * 0.0697,
+                    2.0e-2 * 0.0697,
+                    2.0e-2 * 0.0697,
                 ],
                 dtype=float,
             )
+
         if measurement_noise_diag is None:
+            # EMPIRICALLY TUNED (1.01x option B)
             measurement_noise_diag = np.array(
                 [
-                    5.0e-3,
-                    5.0e-3,
-                    5.0e-3,
-                    2.0e-2,
-                    2.0e-2,
-                    2.0e-2,
-                    5.0e-3,
-                    5.0e-3,
-                    5.0e-3,
-                    2.0e-2,
-                    2.0e-2,
-                    2.0e-2,
+                    5.0e-3 * 0.1333,
+                    5.0e-3 * 0.1333,
+                    5.0e-3 * 0.1333,
+                    2.0e-2 * 0.1333,
+                    2.0e-2 * 0.1333,
+                    2.0e-2 * 0.1333,
+                    5.0e-3 * 0.1333,
+                    5.0e-3 * 0.1333,
+                    5.0e-3 * 0.1333,
+                    2.0e-2 * 0.1333,
+                    2.0e-2 * 0.1333,
+                    2.0e-2 * 0.1333,
                 ],
                 dtype=float,
             )
+
+        self.R_default = np.diag(np.asarray(measurement_noise_diag, dtype=float))
+        self.Q = np.diag(np.asarray(process_noise_diag, dtype=float))
+
         if initial_cov_diag is None:
             initial_cov_diag = np.array(
                 [
@@ -108,10 +127,7 @@ class QuadcopterEKF:
                 dtype=float,
             )
 
-        self.Q = np.diag(np.asarray(process_noise_diag, dtype=float))
-        self.R_default = np.diag(np.asarray(measurement_noise_diag, dtype=float))
         self.P0 = np.diag(np.asarray(initial_cov_diag, dtype=float))
-
         self.x = np.zeros(STATE_DIM, dtype=float)
         self.P = self.P0.copy()
 
@@ -282,6 +298,11 @@ class QuadcopterEKF:
         self.P = 0.5 * (self.P + self.P.T)
         return self.x.copy()
 
+    def predict_dropout(self, omega=None, dt=None, u=None):
+        """Specialized prediction for GPS/Sensor loss."""
+        Q_dropout = np.diag(DROPOUT_Q_DIAG)
+        return self.predict(omega=omega, dt=dt, process_noise=Q_dropout)
+
     @staticmethod
     def measurement_matrix(indices: Iterable[int]) -> np.ndarray:
         indices = tuple(int(idx) for idx in indices)
@@ -407,6 +428,11 @@ class QuadcopterEKF:
             "state": self.x.copy(),
             "covariance": self.P.copy(),
         }
+
+    def decouple_all_groups(self):
+        """Zeros out all cross-correlations: pos/vel <-> att/rates during dropout."""
+        self.P[0:6, 6:12] = 0
+        self.P[6:12, 0:6] = 0
 
 
 class PhoenixEKFAdapter:
