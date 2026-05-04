@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python AI_UAV_Tests/ekf_tuner_agent.py --n-trials 5 --max-iter 12 --sigma-start 5.0 --r-scale-start 5.0)",
+      "Bash(python AI_UAV_Tests/ekf_tuner_agent.py --n-trials 5 --max-iter 20 --sigma-start 42 --r-scale-start 13)",
+      "Bash(python AI_UAV_Tests/ekf_tuner_agent.py --n-trials 4 --max-iter 35 --sigma-start 1.0 --r-scale-start 1.0 --beta-nis 50)",
+      "Bash(python AI_UAV_Tests/ekf_tuner_agent.py --n-trials 4 --max-iter 30 --sigma-start 1.0 --r-scale-start 1.0 --beta-nis 50)",
+      "Bash(python -c ' *)",
+      "Bash(python AI_UAV_Tests/ekf_tuner_agent.py --n-trials 4 --max-iter 25)",
+      "Bash(python AI_UAV_Tests/ekf_tuner_agent.py --n-trials 4 --max-iter 12)"
+    ]
+  }
+}

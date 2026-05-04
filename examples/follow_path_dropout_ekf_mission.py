@@ -23,6 +23,7 @@ from phoenix_drone_simulation.envs.control import AttitudeRate
 from phoenix_drone_simulation.envs.followpath_dropout_mission import (
     DroneFollowPathDropoutMissionEnv,
 )
+from phoenix_drone_simulation.envs.sensors import SensorNoise
 from AI_UAV_Tests.quadcopter_env import QuadcopterPID
 from AI_UAV_Tests.quadcopter_ekf import PhoenixEKFAdapter
 from AI_UAV_Tests.trajectories_library import FlightMission
@@ -100,6 +101,9 @@ def main():
     else:
         print("Running headless. Use --render to enable the PyBullet GUI and keyboard dropout controls.")
 
+    last_ctrl_pos = env.drone.xyz.copy()
+    noise_gen     = SensorNoise()
+
     steps = int(mission.total_time / env.TIME_STEP)
     log_t = []
     log_ref = []
@@ -129,12 +133,22 @@ def main():
             pos_ref = np.asarray(pos_ref, dtype=float)
             vel_ref = np.asarray(vel_ref, dtype=float)
 
-        quad.inject_external_state(
-            estimate["x"],
-            estimate["v"],
-            estimate["ang"],
-            estimate["rate"],
-        )
+        # During dropout: freeze GPS position for stable control (prevents
+        # open-loop divergence caused by feeding drifting EKF estimate into PID)
+        if env.dropout_mgr.active:
+            _, _, n_att, n_rate, _ = noise_gen.add_noise(
+                env.drone.xyz, env.drone.xyz_dot, env.drone.rpy, env.drone.rpy_dot,
+                np.zeros(3, dtype=float), env.TIME_STEP,
+            )
+            quad.inject_external_state(last_ctrl_pos, np.zeros(3, dtype=float), n_att, n_rate)
+        else:
+            quad.inject_external_state(
+                estimate["x"],
+                estimate["v"],
+                estimate["ang"],
+                estimate["rate"],
+            )
+            last_ctrl_pos = np.asarray(estimate["x"]).copy()
 
         z_ref = float(pos_ref[2])
         ctrl = quad.step(pos_ref, vel_ref, z_ref=z_ref)

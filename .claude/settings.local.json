@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python examples/ekf_validation.py --n-trials 5 --save-dir results/)"
+    ]
+  }
+}
