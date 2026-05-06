@@ -130,7 +130,7 @@ class QuadcopterPID:
     # =========================================================
     #  PID LAYER 1: Position → Desired Angles
     # =========================================================
-    def position_pid(self, pos_ref, vel_ref, z_ref=1.0):
+    def position_pid(self, pos_ref, vel_ref, z_ref=1.0, freeze_z_integrator=False):
 
         # XY PD
         exy = pos_ref[:2] - self.x[:2]
@@ -142,8 +142,9 @@ class QuadcopterPID:
         ez = z_ref - self.x[2]
         evz = -self.v[2]
 
-        self.z_int += ez * self.dt
-        self.z_int = np.clip(self.z_int, -self.z_int_limit, self.z_int_limit)
+        if not freeze_z_integrator:
+            self.z_int += ez * self.dt
+            self.z_int = np.clip(self.z_int, -self.z_int_limit, self.z_int_limit)
 
         a_z = (
             self.Kp_z * ez +
@@ -259,10 +260,15 @@ class QuadcopterPID:
     # =========================================================
     #  Unified Step: Works for BOTH Phoenix and RK4 simulator
     # =========================================================
-    def step(self, pos_ref, vel_ref, z_ref=1.0):
+    def step(self, pos_ref, vel_ref, z_ref=1.0, freeze_z_integrator=False):
 
         # Position PID
-        U1, phi_des, th_des, psi_des = self.position_pid(pos_ref, vel_ref, z_ref)
+        U1, phi_des, th_des, psi_des = self.position_pid(
+            pos_ref,
+            vel_ref,
+            z_ref,
+            freeze_z_integrator=freeze_z_integrator,
+        )
 
         # Attitude PID → desired rates
         rates_des = self.attitude_pid(phi_des, th_des, psi_des)

@@ -45,7 +45,6 @@ from phoenix_drone_simulation.envs.sensors import SensorNoise
 from AI_UAV_Tests.quadcopter_env import QuadcopterPID
 from AI_UAV_Tests.quadcopter_ekf import (
     QuadcopterEKF, QuadcopterPhysicalParams, PhoenixEKFAdapter, STATE_DIM,
-    DROPOUT_Q_DIAG,
 )
 from AI_UAV_Tests.trajectories_library import FlightMission
 
@@ -211,6 +210,7 @@ def run_ekf_trial(seed: int = 0, with_dropout: bool = True) -> TrialLog:
     steps = int(mission.total_time / env.TIME_STEP)
     drop_triggered, drop_done = False, False
     _prev_drop = False
+    dropout_elapsed = 0.0
     last_valid_ref = np.array([0.0, 0.0, 1.0], dtype=float)
     last_ctrl_pos  = env.drone.xyz.copy()
 
@@ -257,10 +257,15 @@ def run_ekf_trial(seed: int = 0, with_dropout: bool = True) -> TrialLog:
         if is_drop:
             if not _prev_drop:
                 ekf.decouple_all_groups()   # zero all cross-cov at onset
-            Q_drop = np.diag(np.asarray(DROPOUT_Q_DIAG, dtype=float))
+                dropout_elapsed = 0.0
+            dropout_elapsed += env.TIME_STEP
             # Use hover omega (not PID omega_cmd) so altitude-integrator windup
             # does not drive the EKF position estimate to tens of metres.
-            ekf.predict(omega=_omega_hover, dt=env.TIME_STEP, process_noise=Q_drop)
+            ekf.predict_dropout(
+                omega=_omega_hover,
+                dt=env.TIME_STEP,
+                dropout_time=dropout_elapsed,
+            )
             # IMU (attitude + body rates) is still available during GPS dropout.
             # Updating att/rate keeps the attitude estimate accurate, which in turn
             # keeps the thrust-direction prediction correct for position dead-reckoning.
@@ -273,6 +278,7 @@ def run_ekf_trial(seed: int = 0, with_dropout: bool = True) -> TrialLog:
         else:
             if _prev_drop:
                 ekf.decouple_all_groups()   # zero cross-cov again at recovery
+            dropout_elapsed = 0.0
             ekf.predict(omega=ctrl["omega_cmd"], dt=env.TIME_STEP)
             # Add realistic sensor noise so the filter operates as designed
             # (Q/R were calibrated for noisy measurements, not clean ground truth).

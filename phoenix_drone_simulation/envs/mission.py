@@ -19,16 +19,40 @@ class DropoutManager:
 
         # Stored references
         self.hold_pos = None
+        self.trigger_pos = None
+        self.rth_target = None
+        self.land_xy = None
 
-    def trigger(self, current_pos: np.ndarray):
+    def trigger(
+        self,
+        current_pos: np.ndarray,
+        *,
+        home_pos: np.ndarray | None = None,
+        rth_altitude: float | None = None,
+    ):
+        current_pos = np.asarray(current_pos, dtype=np.float32).copy()
         self.active = True
+        self.trigger_pos = current_pos
 
         if self.mode == "HOV":
             self.hold_pos = current_pos.copy()
+        elif self.mode == "RTH":
+            if home_pos is None:
+                raise ValueError("home_pos is required for RTH mode")
+            safe_altitude = float(max(current_pos[2], 0.0 if rth_altitude is None else rth_altitude))
+            self.rth_target = np.array(
+                [home_pos[0], home_pos[1], safe_altitude],
+                dtype=np.float32,
+            )
+        elif self.mode == "LAND":
+            self.land_xy = current_pos[:2].copy()
 
     def clear(self):
         self.active = False
         self.hold_pos = None
+        self.trigger_pos = None
+        self.rth_target = None
+        self.land_xy = None
         self.mode = "NONE"
 
 
@@ -97,7 +121,11 @@ class DroneMissionEnv(DroneHoverBaseEnv):
         self.active_target = np.asarray(target, dtype=np.float32)
 
     def trigger_dropout(self):
-        self.dropout_mgr.trigger(self.drone.xyz)
+        self.dropout_mgr.trigger(
+            self.drone.xyz,
+            home_pos=self.home_pos,
+            rth_altitude=self.rth_altitude,
+        )
 
     def clear_dropout(self):
         self.dropout_mgr.clear()
@@ -130,11 +158,16 @@ class DroneMissionEnv(DroneHoverBaseEnv):
         # Return to home (NO descent)
         # -------------------------
         if mode == "RTH":
-            return np.array([
-                self.home_pos[0],
-                self.home_pos[1],
-                max(self.drone.xyz[2], self.rth_altitude)
-            ])
+            if self.dropout_mgr.rth_target is not None:
+                return self.dropout_mgr.rth_target
+            return np.array(
+                [
+                    self.home_pos[0],
+                    self.home_pos[1],
+                    max(self.drone.xyz[2], self.rth_altitude),
+                ],
+                dtype=np.float32,
+            )
 
         # -------------------------
         # Land (vertical descent)
@@ -144,11 +177,16 @@ class DroneMissionEnv(DroneHoverBaseEnv):
                 self.drone.xyz[2] - self.land_descent_rate * self.TIME_STEP,
                 0.0
             )
+            xy_ref = (
+                self.dropout_mgr.land_xy
+                if self.dropout_mgr.land_xy is not None
+                else self.drone.xyz[:2]
+            )
             return np.array([
-                self.drone.xyz[0],
-                self.drone.xyz[1],
+                xy_ref[0],
+                xy_ref[1],
                 z_next
-            ])
+            ], dtype=np.float32)
 
         return self.active_target
 

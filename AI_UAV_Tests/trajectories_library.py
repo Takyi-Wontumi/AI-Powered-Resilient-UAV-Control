@@ -71,6 +71,15 @@ class Trajectories:
         vy = amplitude * 2.0 * np.pi * freq * np.cos(2.0 * np.pi * freq * t)
         return np.array([x, y, z], dtype=float), np.array([vx, vy, 0.0], dtype=float)
 
+    @staticmethod
+    def figure_eight_traj(t: float, scale=1.0, z=1.0, period=10.0):
+        omega = 2.0 * np.pi / period
+        x = scale * np.sin(omega * t)
+        y = scale * np.sin(omega * t) * np.cos(2.0 * omega * t)
+        vx = scale * omega * np.cos(omega * t)
+        vy = scale * omega * (np.cos(omega * t) * np.cos(2.0 * omega * t) - 2.0 * np.sin(omega * t) * np.sin(2.0 * omega * t))
+        return np.array([x, y, z], dtype=float), np.array([vx, vy, 0.0], dtype=float)
+
 
 # =========================================================
 # Composable mission framework (local analytic trajectories)
@@ -109,6 +118,7 @@ class FlightMission:
     """
     DEFAULT_PHASE_COLORS = {
         "circle": (0.20, 0.60, 1.00),
+        "figure_eight": (1.00, 0.10, 0.75),
         "hover": (0.10, 0.85, 0.25),
         "square": (1.00, 0.55, 0.05),
         "point": (0.10, 0.85, 0.85),
@@ -477,6 +487,27 @@ class FlightMission:
             return pos, vel
 
         return self.add_phase("square", duration, _traj)
+
+    def add_figure_eight(
+        self,
+        duration: float,
+        scale: float = 1.0,
+        period: float = 10.0,
+        z: Optional[float] = None,
+        center_xy: Tuple[float, float] = (0.0, 0.0),
+    ):
+        z_use = self.default_z if z is None else float(z)
+        self._ensure_takeoff_if_needed(z_use)
+        cx, cy = float(center_xy[0]), float(center_xy[1])
+
+        def _traj(local_t):
+            pos, vel = Trajectories.figure_eight_traj(local_t, scale=scale, z=z_use, period=period)
+            pos = pos.copy()
+            pos[0] += cx
+            pos[1] += cy
+            return pos, vel
+
+        return self.add_phase("figure_eight", duration, _traj)
 
     def add_hover(
         self,

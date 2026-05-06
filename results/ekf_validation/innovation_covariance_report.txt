@@ -1,0 +1,14 @@
+Innovation covariance matching report
+Nominal innovation covariance: samples=7005 dim=9
+  diag empirical/predicted ratio = [6.836e-01, 3.269e-01, 2.330e+01, 1.936e+00, 1.306e+00, 3.572e+01,
+ 6.115e+02, 1.315e+01, 4.025e+02]
+  relative Frobenius error       = 131.354
+  empirical diag                = [0.00473, 0.0023 , 0.04327, 0.00403, 0.00277, 0.03016, 0.98349, 0.02115,
+ 0.64739]
+  predicted diag                = [0.00692, 0.00704, 0.00186, 0.00208, 0.00212, 0.00084, 0.00161, 0.00161,
+ 0.00161]
+Dropout innovation covariance: samples=3995 dim=3
+  diag empirical/predicted ratio = [163.098, 324.567,  19.45 ]
+  relative Frobenius error       = 250.752
+  empirical diag                = [0.10815, 0.21521, 0.0129 ]
+  predicted diag                = [0.00066, 0.00066, 0.00066]

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import numpy as np
-from phoenix_drone_simulation.envs.sensors import SensorNoise
+from AI_UAV_Tests.sensors_ekf import EKFSensorNoise
 
 
 STATE_DIM = 12
@@ -26,21 +26,106 @@ VEL_IDX = slice(3, 6)
 ANG_IDX = slice(6, 9)
 RATE_IDX = slice(9, 12)
 
-# Module-level dropout Q profile (used when GPS drops out)
-DROPOUT_Q_DIAG = np.array([5e-4, 5e-4, 5e-4, 5e-4, 5e-4, 5e-4,
-                            4e-8, 4e-8, 4e-8, 5e-4, 5e-4, 5e-4])
+_EKF_Q_SCALE = 1.0
+_EKF_R_SCALE = 1.0
+
+def _uniform_variance(half_range: float) -> float:
+    """Variance of U[-a, a] when `half_range == a`."""
+    a = float(half_range)
+    return (a * a) / 3.0
+
+
+def _sensor_measurement_noise_diag(sensor_noise: EKFSensorNoise, dt: float) -> np.ndarray:
+    """Map the simulator sensor model onto the EKF's direct-state measurement R.
+
+    Position, velocity, and attitude are direct white-noise mappings.
+    For body rates, match only the terms that appear per sample in the selected
+    EKF sensor model. When `sample_turn_on_bias_once=True`, turn-on bias is a
+    constant offset per reset and is intentionally excluded from white R.
+    """
+    pos_var = sensor_noise.pos_norm_std ** 2 + _uniform_variance(sensor_noise.pos_unif_range)
+    vel_var = sensor_noise.vel_norm_std ** 2 + _uniform_variance(sensor_noise.vel_unif_range)
+    ang_var = sensor_noise.quat_norm_std ** 2 + _uniform_variance(sensor_noise.quat_unif_range)
+
+    sigma_g_d = sensor_noise.gyro_noise_density / np.sqrt(float(dt))
+    rate_var = (
+        sigma_g_d ** 2
+        + sensor_noise.gyro_random_walk ** 2
+    )
+    if not getattr(sensor_noise, "sample_turn_on_bias_once", False):
+        rate_var += sensor_noise.gyro_turn_on_bias_sigma ** 2
+
+    return np.array(
+        [pos_var, pos_var, pos_var,
+         vel_var, vel_var, vel_var,
+         ang_var, ang_var, ang_var,
+         rate_var, rate_var, rate_var],
+        dtype=float,
+    )
+
+
+def _continuous_white_accel_block(dt: float, sigma: float) -> np.ndarray:
+    """Continuous white acceleration noise integrated into one [state, rate] pair."""
+    q = float(sigma) ** 2
+    return q * np.array(
+        [
+            [dt ** 3 / 3.0, dt ** 2 / 2.0],
+            [dt ** 2 / 2.0, dt],
+        ],
+        dtype=float,
+    )
+
+
+def _build_structured_process_noise(
+    dt: float,
+    sigma_acc_xy: float,
+    sigma_acc_z: float,
+    sigma_ang_rate_xy: float,
+    sigma_ang_rate_z: float,
+    q_pos_floor: float = 5.0e-6,
+    q_vel_floor: float = 2.5e-4,
+    q_ang_floor: float = 1.0e-4,
+    q_rate_floor: float = 2.0e-3,
+) -> np.ndarray:
+    """Build a structured Q for translational and angular integrated states."""
+    Q = np.zeros((STATE_DIM, STATE_DIM), dtype=float)
+
+    lin_xy = _continuous_white_accel_block(dt, sigma_acc_xy)
+    lin_z = _continuous_white_accel_block(dt, sigma_acc_z)
+    ang_xy = _continuous_white_accel_block(dt, sigma_ang_rate_xy)
+    ang_z = _continuous_white_accel_block(dt, sigma_ang_rate_z)
+
+    for pos_idx, vel_idx, block in ((0, 3, lin_xy), (1, 4, lin_xy), (2, 5, lin_z)):
+        Q[np.ix_([pos_idx, vel_idx], [pos_idx, vel_idx])] = block
+        Q[pos_idx, pos_idx] += float(q_pos_floor)
+        Q[vel_idx, vel_idx] += float(q_vel_floor)
+
+    for ang_idx, rate_idx, block in ((6, 9, ang_xy), (7, 10, ang_xy), (8, 11, ang_z)):
+        Q[np.ix_([ang_idx, rate_idx], [ang_idx, rate_idx])] = block
+        Q[ang_idx, ang_idx] += float(q_ang_floor)
+        Q[rate_idx, rate_idx] += float(q_rate_floor)
+
+    return Q * _EKF_Q_SCALE
 
 
 @dataclass(frozen=True)
 class QuadcopterPhysicalParams:
-    m: float = 0.028
-    l: float = 0.046
+    """Defaults aligned with the Phoenix Bullet Crazyflie URDF."""
+
+    m: float = 0.030
+    # Phoenix uses an X-configuration; 0.028 m is the effective torque arm.
+    l: float = 0.028
     b: float = 1.4e-6
     d: float = 1.1e-7
     g: float = 9.81
-    Ix: float = 16.6e-6
-    Iy: float = 16.6e-6
-    Iz: float = 29.3e-6
+    Ix: float = 1.33e-5
+    Iy: float = 1.33e-5
+    Iz: float = 2.64e-5
+    # Leave drag disabled in the EKF until a process model consistent with the
+    # Phoenix drag implementation is identified.
+    drag_x: float = 0.0
+    drag_y: float = 0.0
+    drag_z: float = 0.0
 
 
 class QuadcopterEKF:
@@ -54,57 +139,44 @@ class QuadcopterEKF:
         measurement_noise_diag: Sequence[float] | None = None,
         initial_cov_diag: Sequence[float] | None = None,
         adapt_noise: bool = False,
-        sigma_acc: float = 0.008,
-        sigma_gyro: float = 0.0005,
+        sigma_acc_xy: float = 0.5,
+        sigma_acc_z: float = 0.8,
+        sigma_ang_rate_xy: float = 0.3,
+        sigma_ang_rate_z: float = 0.45,
+        q_pos_floor: float = 5.0e-6,
+        q_vel_floor: float = 2.5e-4,
+        q_ang_floor: float = 1.0e-4,
+        q_rate_floor: float = 2.0e-3,
     ):
         self.dt = float(dt)
         self.params = params or QuadcopterPhysicalParams()
         self.adapt_noise = adapt_noise
-        self.sigma_acc = sigma_acc
-        self.sigma_gyro = sigma_gyro
+        self.sigma_acc_xy = float(sigma_acc_xy)
+        self.sigma_acc_z = float(sigma_acc_z)
+        self.sigma_ang_rate_xy = float(sigma_ang_rate_xy)
+        self.sigma_ang_rate_z = float(sigma_ang_rate_z)
+        self.q_pos_floor = float(q_pos_floor)
+        self.q_vel_floor = float(q_vel_floor)
+        self.q_ang_floor = float(q_ang_floor)
+        self.q_rate_floor = float(q_rate_floor)
+        self._uses_custom_process_noise = process_noise_diag is not None
 
         if process_noise_diag is None:
-            # FINAL TUNING: q_scale=0.0547 (0.785x) → NEES = 12 ± 0.25
-            process_noise_diag = np.array(
-                [
-                    1.0e-4 * 0.0547,
-                    1.0e-4 * 0.0547,
-                    1.0e-4 * 0.0547,
-                    5.0e-3 * 0.0547,
-                    5.0e-3 * 0.0547,
-                    5.0e-3 * 0.0547,
-                    1.0e-3 * 0.0547,
-                    1.0e-3 * 0.0547,
-                    1.0e-3 * 0.0547,
-                    2.0e-2 * 0.0547,
-                    2.0e-2 * 0.0547,
-                    2.0e-2 * 0.0547,
-                ],
-                dtype=float,
-            )
+            process_noise = self._default_process_noise(self.dt)
+        else:
+            process_noise = np.asarray(process_noise_diag, dtype=float)
+            if process_noise.shape == (STATE_DIM,):
+                process_noise = np.diag(process_noise)
+            elif process_noise.shape != (STATE_DIM, STATE_DIM):
+                raise ValueError("process_noise_diag must have shape (12,) or (12, 12)")
 
         if measurement_noise_diag is None:
-            # FINAL TUNING: r_scale=0.1047 (0.785x)
-            measurement_noise_diag = np.array(
-                [
-                    5.0e-3 * 0.1047,
-                    5.0e-3 * 0.1047,
-                    5.0e-3 * 0.1047,
-                    2.0e-2 * 0.1047,
-                    2.0e-2 * 0.1047,
-                    2.0e-2 * 0.1047,
-                    5.0e-3 * 0.1047,
-                    5.0e-3 * 0.1047,
-                    5.0e-3 * 0.1047,
-                    2.0e-2 * 0.1047,
-                    2.0e-2 * 0.1047,
-                    2.0e-2 * 0.1047,
-                ],
-                dtype=float,
-            )
+            measurement_noise_diag = _sensor_measurement_noise_diag(
+                EKFSensorNoise(bypass=True), self.dt
+            ) * _EKF_R_SCALE
 
         self.R_default = np.diag(np.asarray(measurement_noise_diag, dtype=float))
-        self.Q = np.diag(np.asarray(process_noise_diag, dtype=float))
+        self.Q = process_noise.copy()
 
         if initial_cov_diag is None:
             initial_cov_diag = np.array(
@@ -128,6 +200,23 @@ class QuadcopterEKF:
         self.P0 = np.diag(np.asarray(initial_cov_diag, dtype=float))
         self.x = np.zeros(STATE_DIM, dtype=float)
         self.P = self.P0.copy()
+        self.last_innovation: np.ndarray | None = None
+        self.last_S: np.ndarray | None = None
+        self.last_NIS: float | None = None
+        self.last_meas_dim: int | None = None
+
+    def _default_process_noise(self, dt: float) -> np.ndarray:
+        return _build_structured_process_noise(
+            dt=float(dt),
+            sigma_acc_xy=self.sigma_acc_xy,
+            sigma_acc_z=self.sigma_acc_z,
+            sigma_ang_rate_xy=self.sigma_ang_rate_xy,
+            sigma_ang_rate_z=self.sigma_ang_rate_z,
+            q_pos_floor=self.q_pos_floor,
+            q_vel_floor=self.q_vel_floor,
+            q_ang_floor=self.q_ang_floor,
+            q_rate_floor=self.q_rate_floor,
+        )
 
     def reset(
         self,
@@ -206,9 +295,18 @@ class QuadcopterEKF:
 
         rotation = self.rotation_matrix(state[ANG_IDX])
         thrust = params.b * np.sum(omega ** 2)
+        drag = np.array(
+            [
+                params.drag_x * vx,
+                params.drag_y * vy,
+                params.drag_z * vz,
+            ],
+            dtype=float,
+        )
         acc = (
             thrust * (rotation @ np.array([0.0, 0.0, 1.0], dtype=float)) / params.m
             - np.array([0.0, 0.0, params.g], dtype=float)
+            - drag
         )
 
         w1, w2, w3, w4 = omega
@@ -271,9 +369,26 @@ class QuadcopterEKF:
             delta[idx] = eps
             y_plus = np.asarray(func(x0 + delta), dtype=float)
             y_minus = np.asarray(func(x0 - delta), dtype=float)
-            jac[:, idx] = (y_plus - y_minus) / (2.0 * eps)
+            diff = y_plus - y_minus
+            for angle_idx in range(ANG_IDX.start, min(ANG_IDX.stop, diff.size)):
+                diff[angle_idx] = self._wrap_angle(diff[angle_idx])
+            jac[:, idx] = diff / (2.0 * eps)
 
         return jac
+
+    def _stabilize_covariance(
+        self,
+        min_var: float = 1.0e-9,
+        max_var: float = 1.0e3,
+    ) -> None:
+        self.P = 0.5 * (self.P + self.P.T)
+        diag = np.clip(np.diag(self.P), float(min_var), float(max_var))
+        np.fill_diagonal(self.P, diag)
+
+        eigvals = np.linalg.eigvalsh(self.P)
+        min_eig = float(np.min(eigvals))
+        if min_eig < min_var:
+            self.P += np.eye(self.P.shape[0], dtype=float) * (float(min_var) - min_eig + 1.0e-12)
 
     def predict(
         self,
@@ -284,7 +399,10 @@ class QuadcopterEKF:
         """Run the EKF process update using motor angular speeds."""
         dt = self.dt if dt is None else float(dt)
         omega = np.asarray(omega, dtype=float).reshape(4)
-        process_noise = self.Q if process_noise is None else np.asarray(process_noise, dtype=float)
+        if process_noise is None:
+            process_noise = self.Q if self._uses_custom_process_noise else self._default_process_noise(dt)
+        else:
+            process_noise = np.asarray(process_noise, dtype=float)
         if process_noise.shape != (STATE_DIM, STATE_DIM):
             raise ValueError("process_noise must have shape (12, 12)")
 
@@ -293,12 +411,37 @@ class QuadcopterEKF:
 
         self.x = transition(self.x)
         self.P = F @ self.P @ F.T + process_noise
-        self.P = 0.5 * (self.P + self.P.T)
+        self._stabilize_covariance()
         return self.x.copy()
 
-    def predict_dropout(self, omega=None, dt=None, u=None):
-        """Specialized prediction for GPS/Sensor loss."""
-        Q_dropout = np.diag(DROPOUT_Q_DIAG)
+    def make_dropout_Q(self, dt: float | None = None, dropout_time: float = 0.0) -> np.ndarray:
+        """Inflate process noise by state group during exteroceptive dropout."""
+        dt = self.dt if dt is None else float(dt)
+        dropout_time = max(0.0, float(dropout_time))
+        Q = self.Q.copy() if self._uses_custom_process_noise else self._default_process_noise(dt)
+
+        pos_scale = 1.0 + 0.03 * dropout_time ** 2
+        vel_scale = 1.0 + 0.05 * dropout_time
+        att_scale = 1.0 + 1.0 * dropout_time
+        rate_scale = 1.0 + 1.25 * dropout_time
+        yaw_scale = 1.0 + 1.5 * dropout_time
+
+        Q[0:3, 0:3] *= pos_scale
+        Q[3:6, 3:6] *= vel_scale
+        Q[6:9, 6:9] *= att_scale
+        Q[9:12, 9:12] *= rate_scale
+        Q[8, 8] *= yaw_scale
+        Q[11, 11] *= yaw_scale
+        return Q
+
+    def predict_dropout(
+        self,
+        omega: Sequence[float],
+        dt: float | None = None,
+        dropout_time: float = 0.0,
+    ) -> np.ndarray:
+        """Prediction helper for dropout periods using state-group-specific Q inflation."""
+        Q_dropout = self.make_dropout_Q(dt=dt, dropout_time=dropout_time)
         return self.predict(omega=omega, dt=dt, process_noise=Q_dropout)
 
     @staticmethod
@@ -314,6 +457,52 @@ class QuadcopterEKF:
     def default_measurement_noise(self, indices: Iterable[int]) -> np.ndarray:
         indices = tuple(int(idx) for idx in indices)
         return np.diag(np.diag(self.R_default)[list(indices)])
+
+    @staticmethod
+    def stack_measurements(
+        *components: tuple[np.ndarray, np.ndarray, np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Concatenate sensor-specific measurement blocks into one EKF update."""
+        valid_components = [component for component in components if component is not None]
+        if not valid_components:
+            raise ValueError("at least one measurement component must be provided")
+
+        z = np.concatenate([np.asarray(component[0], dtype=float).reshape(-1) for component in valid_components])
+        H = np.vstack([np.asarray(component[1], dtype=float) for component in valid_components])
+        total_dim = int(sum(np.asarray(component[0], dtype=float).size for component in valid_components))
+        R = np.zeros((total_dim, total_dim), dtype=float)
+        row = 0
+        for component in valid_components:
+            block = np.asarray(component[2], dtype=float)
+            next_row = row + block.shape[0]
+            R[row:next_row, row:next_row] = block
+            row = next_row
+        return z, H, R
+
+    def build_gps_measurement(self, position: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return self.build_measurement(position=position)
+
+    def build_velocity_measurement(self, velocity: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return self.build_measurement(velocity=velocity)
+
+    def build_odom_measurement(
+        self,
+        position: Sequence[float],
+        velocity: Sequence[float],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return self.build_measurement(position=position, velocity=velocity)
+
+    def build_baro_measurement(self, z: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        measurement = np.array([float(z)], dtype=float)
+        H = self.measurement_matrix([2])
+        R = self.default_measurement_noise([2])
+        return measurement, H, R
+
+    def build_gyro_measurement(self, rates: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return self.build_measurement(rates=rates)
+
+    def build_attitude_measurement(self, attitude: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return self.build_measurement(attitude=attitude)
 
     def build_measurement(
         self,
@@ -387,13 +576,18 @@ class QuadcopterEKF:
 
         y = self.innovation(measurement, H)
         S = H @ self.P @ H.T + measurement_noise
-        K = self.P @ H.T @ np.linalg.inv(S)
+        PHt = self.P @ H.T
+        K = np.linalg.solve(S.T, PHt.T).T
+        self.last_innovation = y.copy()
+        self.last_S = S.copy()
+        self.last_NIS = float(y.T @ np.linalg.solve(S, y))
+        self.last_meas_dim = int(measurement.size)
 
         self.x = self._wrap_state_angles(self.x + K @ y)
         identity = np.eye(STATE_DIM, dtype=float)
         joseph = identity - K @ H
         self.P = joseph @ self.P @ joseph.T + K @ measurement_noise @ K.T
-        self.P = 0.5 * (self.P + self.P.T)
+        self._stabilize_covariance()
         return self.x.copy()
 
     def step(
@@ -427,6 +621,23 @@ class QuadcopterEKF:
             "covariance": self.P.copy(),
         }
 
+    def diagnostics(self) -> dict:
+        return {
+            "innovation": None if self.last_innovation is None else self.last_innovation.copy(),
+            "S": None if self.last_S is None else self.last_S.copy(),
+            "nis": self.last_NIS,
+            "meas_dim": self.last_meas_dim,
+            "P_diag": np.diag(self.P).copy(),
+            "P_trace": float(np.trace(self.P)),
+        }
+
+    def compute_nees(self, true_state: Sequence[float]) -> float:
+        true_state = np.asarray(true_state, dtype=float).reshape(self.x.shape)
+        error = true_state - self.x
+        for idx in range(ANG_IDX.start, ANG_IDX.stop):
+            error[idx] = self._wrap_angle(error[idx])
+        return float(error.T @ np.linalg.solve(self.P, error))
+
     def decouple_all_groups(self):
         """Zeros out all cross-correlations: pos/vel <-> att/rates during dropout."""
         self.P[0:6, 6:12] = 0
@@ -440,14 +651,27 @@ class PhoenixEKFAdapter:
         self,
         dt: float = 0.002,
         ekf: QuadcopterEKF | None = None,
-        sensor_noise: SensorNoise | None = None,
+        sensor_noise: EKFSensorNoise | None = None,
         use_velocity_measurements: bool = True,
+        use_attitude_measurements: bool = True,
     ):
         self.dt = float(dt)
         self.ekf = ekf or QuadcopterEKF(dt=self.dt)
         # Keep a dedicated noise instance so EKF bias/random-walk state is local.
-        self.sensor_noise = sensor_noise or SensorNoise()
+        self.sensor_noise = sensor_noise or EKFSensorNoise(
+            sample_turn_on_bias_once=True,
+            gyro_turn_on_bias_sigma=0.0,
+        )
+        self.ekf.R_default = np.diag(
+            _sensor_measurement_noise_diag(self.sensor_noise, self.dt)
+        ) * _EKF_R_SCALE
         self.use_velocity_measurements = bool(use_velocity_measurements)
+        self.use_attitude_measurements = bool(use_attitude_measurements)
+        # Dropout tracking for adaptive process noise
+        self.dropout_time = 0.0
+        self.base_Q = self.ekf.Q.copy()
+        # configurable decoupling threshold (seconds). Set to None to disable.
+        self.decouple_after_s = 2.0
 
     @staticmethod
     def _state_vector(
@@ -473,7 +697,8 @@ class PhoenixEKFAdapter:
         rates: Sequence[float],
         covariance: np.ndarray | None = None,
     ) -> None:
-        self.sensor_noise.gyro_bias = np.zeros(3, dtype=float)
+        self.sensor_noise.reset()
+        self.dropout_time = 0.0
         self.ekf.reset(
             state=self._state_vector(position, velocity, attitude, rates),
             covariance=covariance,
@@ -506,16 +731,15 @@ class PhoenixEKFAdapter:
             dt=dt,
         )
 
-        measurement_kwargs = {
-            "attitude": noisy_att,
-            "rates": noisy_rates,
-        }
+        measurement_components = [self.ekf.build_gyro_measurement(noisy_rates)]
+        if self.use_attitude_measurements:
+            measurement_components.append(self.ekf.build_attitude_measurement(noisy_att))
         if not dropout_active:
-            measurement_kwargs["position"] = noisy_pos
+            measurement_components.append(self.ekf.build_gps_measurement(noisy_pos))
             if self.use_velocity_measurements:
-                measurement_kwargs["velocity"] = noisy_vel
+                measurement_components.append(self.ekf.build_velocity_measurement(noisy_vel))
 
-        measurement, H, R = self.ekf.build_measurement(**measurement_kwargs)
+        measurement, H, R = self.ekf.stack_measurements(*measurement_components)
         noisy_state = {
             "position": noisy_pos,
             "velocity": noisy_vel,
@@ -547,13 +771,27 @@ class PhoenixEKFAdapter:
             dropout_active=dropout_active,
             dt=dt,
         )
-        self.ekf.step(
-            omega=motor_omega,
-            measurement=measurement,
-            H=H,
-            dt=dt,
-            measurement_noise=R,
-        )
+        # Adaptive EKF prediction: scale process noise with dropout time.
+        if dropout_active:
+            # accumulate dropout time
+            self.dropout_time += dt
+            self.ekf.predict_dropout(
+                omega=motor_omega,
+                dt=dt,
+                dropout_time=self.dropout_time,
+            )
+            # optional decoupling after prolonged dropout
+            if self.decouple_after_s is not None and self.dropout_time > float(self.decouple_after_s):
+                self.ekf.decouple_all_groups()
+        else:
+            # reset dropout timer
+            if self.dropout_time != 0.0:
+                self.dropout_time = 0.0
+            self.ekf.predict(omega=motor_omega, dt=dt)
+
+        # perform measurement update if measurements present
+        if measurement is not None and H is not None:
+            self.ekf.update(measurement=measurement, H=H, measurement_noise=R)
         estimate = self.ekf.as_dict()
         estimate["measurement"] = noisy_state
         return estimate

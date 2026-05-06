@@ -1,0 +1,7 @@
+EKF noise statistics vs theory
+dt=0.005000 s  n_samples=20000
+position  mean=[ 2.160048e-05 -1.092082e-05 -1.197696e-05]  var=[4.316743e-06 4.254204e-06 4.368623e-06]  theory=4.333333e-06
+velocity  mean=[-5.299202e-05 -3.590695e-05  8.622865e-05]  var=[0.0001   0.0001   0.000102]  theory=1.000000e-04
+attitude  mean=[-4.628829e-06  1.277908e-05  1.135245e-05]  var=[3.281725e-06 3.366123e-06 3.341689e-06]  theory=3.300022e-06
+   rates  mean=[-0.013984 -0.008283  0.026015]  var=[0.00013  0.000154 0.000195]  theory=1.163750e-04
+note: attitude noise is generated for diagnostics but not used in the EKF update path.
