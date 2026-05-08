@@ -15,9 +15,16 @@ from phoenix_drone_simulation.envs.sensors import SensorNoise
 class EKFSensorNoise(SensorNoise):
     """SensorNoise variant used only by the EKF/validation path."""
 
-    def __init__(self, *args, sample_turn_on_bias_once: bool = False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        sample_turn_on_bias_once: bool = False,
+        baro_noise_std: float = 0.02,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.sample_turn_on_bias_once = bool(sample_turn_on_bias_once)
+        self.baro_noise_std = float(baro_noise_std)
         self.gyro_turn_on_bias = np.zeros(3, dtype=float)
         self.reset()
 
@@ -55,3 +62,10 @@ class EKFSensorNoise(SensorNoise):
             + self.gyro_bias
             + self.gyro_random_walk * np.random.normal(0.0, 1.0, 3)
         )
+
+    def add_noise_to_baro(self, z: float) -> float:
+        """Simple barometer model used by EKF-only dropout experiments."""
+        z = float(z)
+        if self.bypass:
+            return z
+        return z + self.baro_noise_std * float(np.random.normal(0.0, 1.0))

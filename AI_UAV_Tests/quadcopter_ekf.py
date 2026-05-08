@@ -83,7 +83,7 @@ def _build_structured_process_noise(
     sigma_ang_rate_xy: float,
     sigma_ang_rate_z: float,
     q_pos_floor: float = 5.0e-6,
-    q_vel_floor: float = 2.5e-4,
+    q_vel_floor: float = 5.0e-4,
     q_ang_floor: float = 1.0e-4,
     q_rate_floor: float = 2.0e-3,
 ) -> np.ndarray:
@@ -139,14 +139,14 @@ class QuadcopterEKF:
         measurement_noise_diag: Sequence[float] | None = None,
         initial_cov_diag: Sequence[float] | None = None,
         adapt_noise: bool = False,
-        sigma_acc_xy: float = 0.5,
-        sigma_acc_z: float = 0.8,
-        sigma_ang_rate_xy: float = 0.3,
-        sigma_ang_rate_z: float = 0.45,
+        sigma_acc_xy: float = 0.65,
+        sigma_acc_z: float = 1.0,
+        sigma_ang_rate_xy: float = 0.4,
+        sigma_ang_rate_z: float = 0.6,
         q_pos_floor: float = 5.0e-6,
-        q_vel_floor: float = 2.5e-4,
-        q_ang_floor: float = 1.0e-4,
-        q_rate_floor: float = 2.0e-3,
+        q_vel_floor: float = 5.0e-4,
+        q_ang_floor: float = 2.0e-4,
+        q_rate_floor: float = 3.0e-3,
     ):
         self.dt = float(dt)
         self.params = params or QuadcopterPhysicalParams()
@@ -204,6 +204,9 @@ class QuadcopterEKF:
         self.last_S: np.ndarray | None = None
         self.last_NIS: float | None = None
         self.last_meas_dim: int | None = None
+        self.last_mahalanobis: float | None = None
+        self.last_update_accepted: bool | None = None
+        self.last_gate_threshold: float | None = None
 
     def _default_process_noise(self, dt: float) -> np.ndarray:
         return _build_structured_process_noise(
@@ -420,14 +423,18 @@ class QuadcopterEKF:
         dropout_time = max(0.0, float(dropout_time))
         Q = self.Q.copy() if self._uses_custom_process_noise else self._default_process_noise(dt)
 
-        pos_scale = 1.0 + 0.03 * dropout_time ** 2
-        vel_scale = 1.0 + 0.05 * dropout_time
-        att_scale = 1.0 + 1.0 * dropout_time
-        rate_scale = 1.0 + 1.25 * dropout_time
-        yaw_scale = 1.0 + 1.5 * dropout_time
+        xy_pos_scale = 1.0 + 5.0 * dropout_time + 8.0 * dropout_time ** 2
+        z_pos_scale = 1.0 + 0.8 * dropout_time + 0.6 * dropout_time ** 2
+        xy_vel_scale = 1.0 + 6.0 * dropout_time + 5.0 * dropout_time ** 2
+        z_vel_scale = 1.0 + 1.0 * dropout_time + 0.4 * dropout_time ** 2
+        att_scale = 1.0 + 1.10 * dropout_time
+        rate_scale = 1.0 + 1.40 * dropout_time
+        yaw_scale = 1.0 + 1.75 * dropout_time
 
-        Q[0:3, 0:3] *= pos_scale
-        Q[3:6, 3:6] *= vel_scale
+        Q[0:2, 0:2] *= xy_pos_scale
+        Q[2, 2] *= z_pos_scale
+        Q[3:5, 3:5] *= xy_vel_scale
+        Q[5, 5] *= z_vel_scale
         Q[6:9, 6:9] *= att_scale
         Q[9:12, 9:12] *= rate_scale
         Q[8, 8] *= yaw_scale
@@ -489,13 +496,42 @@ class QuadcopterEKF:
         self,
         position: Sequence[float],
         velocity: Sequence[float],
+        *,
+        position_std: float | Sequence[float] | None = None,
+        velocity_std: float | Sequence[float] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        return self.build_measurement(position=position, velocity=velocity)
+        measurement = np.concatenate(
+            [
+                np.asarray(position, dtype=float).reshape(3),
+                np.asarray(velocity, dtype=float).reshape(3),
+            ]
+        )
+        H = self.measurement_matrix([0, 1, 2, 3, 4, 5])
+        R = self.default_measurement_noise([0, 1, 2, 3, 4, 5])
 
-    def build_baro_measurement(self, z: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if position_std is not None:
+            pos_std = np.asarray(position_std, dtype=float)
+            if pos_std.ndim == 0:
+                pos_std = np.full(3, float(pos_std), dtype=float)
+            R[0:3, 0:3] = np.diag(np.square(pos_std.reshape(3)))
+        if velocity_std is not None:
+            vel_std = np.asarray(velocity_std, dtype=float)
+            if vel_std.ndim == 0:
+                vel_std = np.full(3, float(vel_std), dtype=float)
+            R[3:6, 3:6] = np.diag(np.square(vel_std.reshape(3)))
+        return measurement, H, R
+
+    def build_baro_measurement(
+        self,
+        z: float,
+        std: float | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         measurement = np.array([float(z)], dtype=float)
         H = self.measurement_matrix([2])
-        R = self.default_measurement_noise([2])
+        if std is None:
+            R = self.default_measurement_noise([2])
+        else:
+            R = np.array([[float(std) ** 2]], dtype=float)
         return measurement, H, R
 
     def build_gyro_measurement(self, rates: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -503,6 +539,38 @@ class QuadcopterEKF:
 
     def build_attitude_measurement(self, attitude: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         return self.build_measurement(attitude=attitude)
+
+    def build_velocity_pseudo_measurement(
+        self,
+        velocity_ref: Sequence[float],
+        std_xy: float = 0.10,
+        std_z: float = 0.08,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        measurement = np.asarray(velocity_ref, dtype=float).reshape(3)
+        H = self.measurement_matrix([3, 4, 5])
+        R = np.diag([float(std_xy) ** 2, float(std_xy) ** 2, float(std_z) ** 2])
+        return measurement, H, R
+
+    def build_position_pseudo_measurement(
+        self,
+        position_ref: Sequence[float],
+        std_xy: float = 0.08,
+        std_z: float = 0.05,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        measurement = np.asarray(position_ref, dtype=float).reshape(3)
+        H = self.measurement_matrix([0, 1, 2])
+        R = np.diag([float(std_xy) ** 2, float(std_xy) ** 2, float(std_z) ** 2])
+        return measurement, H, R
+
+    def build_optical_flow_measurement(
+        self,
+        velocity_xy: Sequence[float],
+        std_xy: float = 0.03,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        measurement = np.asarray(velocity_xy, dtype=float).reshape(2)
+        H = self.measurement_matrix([3, 4])
+        R = np.diag([float(std_xy) ** 2, float(std_xy) ** 2])
+        return measurement, H, R
 
     def build_measurement(
         self,
@@ -548,12 +616,19 @@ class QuadcopterEKF:
 
         return innovation
 
+    @staticmethod
+    def mahalanobis_distance(innovation: np.ndarray, innovation_cov: np.ndarray) -> float:
+        innovation = np.asarray(innovation, dtype=float).reshape(-1)
+        innovation_cov = np.asarray(innovation_cov, dtype=float)
+        return float(innovation @ np.linalg.solve(innovation_cov, innovation))
+
     def update(
         self,
         measurement: Sequence[float],
         H: np.ndarray,
         measurement_noise: np.ndarray | None = None,
-    ) -> np.ndarray:
+        gate_threshold: float | None = None,
+    ) -> bool:
         """Run the EKF measurement update with a linear measurement model."""
         measurement = np.asarray(measurement, dtype=float).reshape(-1)
         H = np.asarray(H, dtype=float)
@@ -576,19 +651,26 @@ class QuadcopterEKF:
 
         y = self.innovation(measurement, H)
         S = H @ self.P @ H.T + measurement_noise
-        PHt = self.P @ H.T
-        K = np.linalg.solve(S.T, PHt.T).T
         self.last_innovation = y.copy()
         self.last_S = S.copy()
         self.last_NIS = float(y.T @ np.linalg.solve(S, y))
         self.last_meas_dim = int(measurement.size)
+        self.last_mahalanobis = self.last_NIS
+        self.last_gate_threshold = None if gate_threshold is None else float(gate_threshold)
+        self.last_update_accepted = True
+        if gate_threshold is not None and self.last_mahalanobis > float(gate_threshold):
+            self.last_update_accepted = False
+            return False
+
+        PHt = self.P @ H.T
+        K = np.linalg.solve(S.T, PHt.T).T
 
         self.x = self._wrap_state_angles(self.x + K @ y)
         identity = np.eye(STATE_DIM, dtype=float)
         joseph = identity - K @ H
         self.P = joseph @ self.P @ joseph.T + K @ measurement_noise @ K.T
         self._stabilize_covariance()
-        return self.x.copy()
+        return True
 
     def step(
         self,
@@ -627,6 +709,9 @@ class QuadcopterEKF:
             "S": None if self.last_S is None else self.last_S.copy(),
             "nis": self.last_NIS,
             "meas_dim": self.last_meas_dim,
+            "mahalanobis": self.last_mahalanobis,
+            "gate_threshold": self.last_gate_threshold,
+            "update_accepted": self.last_update_accepted,
             "P_diag": np.diag(self.P).copy(),
             "P_trace": float(np.trace(self.P)),
         }
@@ -654,6 +739,7 @@ class PhoenixEKFAdapter:
         sensor_noise: EKFSensorNoise | None = None,
         use_velocity_measurements: bool = True,
         use_attitude_measurements: bool = True,
+        use_baro_measurements: bool = True,
     ):
         self.dt = float(dt)
         self.ekf = ekf or QuadcopterEKF(dt=self.dt)
@@ -667,6 +753,7 @@ class PhoenixEKFAdapter:
         ) * _EKF_R_SCALE
         self.use_velocity_measurements = bool(use_velocity_measurements)
         self.use_attitude_measurements = bool(use_attitude_measurements)
+        self.use_baro_measurements = bool(use_baro_measurements)
         # Dropout tracking for adaptive process noise
         self.dropout_time = 0.0
         self.base_Q = self.ekf.Q.copy()
@@ -713,6 +800,10 @@ class PhoenixEKFAdapter:
         *,
         acceleration: Sequence[float] | None = None,
         dropout_active: bool = False,
+        baro_altitude: float | None = None,
+        odom_position: Sequence[float] | None = None,
+        odom_velocity: Sequence[float] | None = None,
+        optical_flow_velocity_xy: Sequence[float] | None = None,
         dt: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
         dt = self.dt if dt is None else float(dt)
@@ -734,10 +825,32 @@ class PhoenixEKFAdapter:
         measurement_components = [self.ekf.build_gyro_measurement(noisy_rates)]
         if self.use_attitude_measurements:
             measurement_components.append(self.ekf.build_attitude_measurement(noisy_att))
+        if self.use_baro_measurements:
+            if baro_altitude is None:
+                baro_altitude = self.sensor_noise.add_noise_to_baro(float(np.asarray(position, dtype=float).reshape(3)[2]))
+            measurement_components.append(
+                self.ekf.build_baro_measurement(
+                    float(baro_altitude),
+                    std=self.sensor_noise.baro_noise_std,
+                )
+            )
         if not dropout_active:
             measurement_components.append(self.ekf.build_gps_measurement(noisy_pos))
-            if self.use_velocity_measurements:
+            if self.use_velocity_measurements and odom_velocity is None and optical_flow_velocity_xy is None:
                 measurement_components.append(self.ekf.build_velocity_measurement(noisy_vel))
+        if odom_position is not None or odom_velocity is not None:
+            odom_pos = noisy_pos if odom_position is None else np.asarray(odom_position, dtype=float).reshape(3)
+            odom_vel = noisy_vel if odom_velocity is None else np.asarray(odom_velocity, dtype=float).reshape(3)
+            measurement_components.append(
+                self.ekf.build_odom_measurement(
+                    position=odom_pos,
+                    velocity=odom_vel,
+                )
+            )
+        elif optical_flow_velocity_xy is not None:
+            measurement_components.append(
+                self.ekf.build_optical_flow_measurement(optical_flow_velocity_xy)
+            )
 
         measurement, H, R = self.ekf.stack_measurements(*measurement_components)
         noisy_state = {
@@ -745,6 +858,15 @@ class PhoenixEKFAdapter:
             "velocity": noisy_vel,
             "attitude": noisy_att,
             "rates": noisy_rates,
+            "baro_altitude": None if baro_altitude is None else float(baro_altitude),
+            "odom_position": None if odom_position is None else np.asarray(odom_position, dtype=float).reshape(3).copy(),
+            "odom_velocity": None if odom_velocity is None else np.asarray(odom_velocity, dtype=float).reshape(3).copy(),
+            "optical_flow_velocity_xy": (
+                None
+                if optical_flow_velocity_xy is None
+                else np.asarray(optical_flow_velocity_xy, dtype=float).reshape(2).copy()
+            ),
+            "dropout_duration_s": float(self.dropout_time),
             "dropout_active": bool(dropout_active),
         }
         return measurement, H, R, noisy_state
@@ -759,18 +881,13 @@ class PhoenixEKFAdapter:
         *,
         acceleration: Sequence[float] | None = None,
         dropout_active: bool = False,
+        baro_altitude: float | None = None,
+        odom_position: Sequence[float] | None = None,
+        odom_velocity: Sequence[float] | None = None,
+        optical_flow_velocity_xy: Sequence[float] | None = None,
         dt: float | None = None,
     ) -> dict:
         dt = self.dt if dt is None else float(dt)
-        measurement, H, R, noisy_state = self.build_noisy_measurement(
-            position=position,
-            velocity=velocity,
-            attitude=attitude,
-            rates=rates,
-            acceleration=acceleration,
-            dropout_active=dropout_active,
-            dt=dt,
-        )
         # Adaptive EKF prediction: scale process noise with dropout time.
         if dropout_active:
             # accumulate dropout time
@@ -789,11 +906,26 @@ class PhoenixEKFAdapter:
                 self.dropout_time = 0.0
             self.ekf.predict(omega=motor_omega, dt=dt)
 
+        measurement, H, R, noisy_state = self.build_noisy_measurement(
+            position=position,
+            velocity=velocity,
+            attitude=attitude,
+            rates=rates,
+            acceleration=acceleration,
+            dropout_active=dropout_active,
+            baro_altitude=baro_altitude,
+            odom_position=odom_position,
+            odom_velocity=odom_velocity,
+            optical_flow_velocity_xy=optical_flow_velocity_xy,
+            dt=dt,
+        )
+
         # perform measurement update if measurements present
         if measurement is not None and H is not None:
             self.ekf.update(measurement=measurement, H=H, measurement_noise=R)
         estimate = self.ekf.as_dict()
         estimate["measurement"] = noisy_state
+        estimate["dropout_duration_s"] = float(self.dropout_time)
         return estimate
 
 

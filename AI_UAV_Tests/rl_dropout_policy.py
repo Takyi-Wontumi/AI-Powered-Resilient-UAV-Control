@@ -246,6 +246,7 @@ class DroneDropoutRLEnv(gym.Env):
         ref_vel: np.ndarray,
         *,
         freeze_z_integrator: bool = False,
+        control_profile: str = "nominal",
     ) -> dict:
         self._inject_estimate_into_pid()
         return self.quad.step(
@@ -253,6 +254,7 @@ class DroneDropoutRLEnv(gym.Env):
             ref_vel,
             z_ref=float(ref_pos[2]),
             freeze_z_integrator=freeze_z_integrator,
+            control_profile=control_profile,
         )
 
     def _preview_pid_output(
@@ -261,6 +263,7 @@ class DroneDropoutRLEnv(gym.Env):
         ref_vel: np.ndarray,
         *,
         freeze_z_integrator: bool = False,
+        control_profile: str = "nominal",
     ) -> dict:
         snapshot = self._controller_snapshot()
         try:
@@ -268,6 +271,7 @@ class DroneDropoutRLEnv(gym.Env):
                 ref_pos,
                 ref_vel,
                 freeze_z_integrator=freeze_z_integrator,
+                control_profile=control_profile,
             )
         finally:
             self._restore_controller_snapshot(snapshot)
@@ -305,10 +309,11 @@ class DroneDropoutRLEnv(gym.Env):
         # Append baseline controller output (u_pid) normalized.
         U1_pid = float(pid_ctrl["thrust_cmd"])
         tau_pid = np.asarray(pid_ctrl.get("tau_cmd", np.zeros(3)), dtype=float).reshape(3)
+        tau_limit = float(pid_ctrl.get("tau_limit", self.quad.tau_max))
 
         # Normalize: thrust via same mapping as _thrust_to_action, taus by tau_max
         thrust_norm = self._thrust_to_action(U1_pid, self.quad.m)
-        tau_norm = np.clip(tau_pid / float(self.quad.tau_max), -1.0, 1.0)
+        tau_norm = np.clip(tau_pid / max(tau_limit, 1.0e-9), -1.0, 1.0)
 
         state = np.concatenate([state, [alpha_effective, thrust_norm], tau_norm]).astype(np.float32)
 
@@ -347,15 +352,18 @@ class DroneDropoutRLEnv(gym.Env):
         U1_pid = float(pid_ctrl["thrust_cmd"])
         tau_pid = np.asarray(pid_ctrl.get("tau_cmd", np.zeros(3)), dtype=float).reshape(3)
         rates_des_pid = np.asarray(pid_ctrl.get("rates_des", np.zeros(3)), dtype=float).reshape(3)
+        tau_limit = float(pid_ctrl.get("tau_limit", self.quad.tau_max))
+        rate_p_gain = np.asarray(pid_ctrl.get("rate_p_gain", self.quad.Kp_rate), dtype=float).reshape(3)
+        max_rate = float(pid_ctrl.get("max_rate", self.quad.max_rate))
         std_pos = np.sqrt(np.maximum(np.diag(self.ekf.ekf.P)[0:3], 1e-9))
         alpha_eff = self._effective_alpha(std_pos)
 
         # Compute physical delta limits
         delta_limits = np.array([
             self.residual_thrust_limit_scale * self.quad.m * self.quad.g,
-            self.residual_tau_limit_scale * self.quad.tau_max,
-            self.residual_tau_limit_scale * self.quad.tau_max,
-            self.residual_tau_limit_scale * self.quad.tau_max,
+            self.residual_tau_limit_scale * tau_limit,
+            self.residual_tau_limit_scale * tau_limit,
+            self.residual_tau_limit_scale * tau_limit,
         ], dtype=float)
 
         # Map normalized action to physical residuals and clip
@@ -368,12 +376,12 @@ class DroneDropoutRLEnv(gym.Env):
             0.5 * self.quad.m * self.quad.g,
             1.3 * self.quad.m * self.quad.g,
         ))
-        tau_final = np.clip(tau_pid + alpha_eff * delta_u[1:4], -self.quad.tau_max, self.quad.tau_max)
+        tau_final = np.clip(tau_pid + alpha_eff * delta_u[1:4], -tau_limit, tau_limit)
 
         # Approximate desired rates that would produce tau_final by inverting P gain
         tau_delta_applied = tau_final - tau_pid
-        rates_des_final = rates_des_pid + tau_delta_applied / np.maximum(self.quad.Kp_rate, 1e-8)
-        rates_des_final = np.clip(rates_des_final, -self.quad.max_rate, self.quad.max_rate)
+        rates_des_final = rates_des_pid + tau_delta_applied / np.maximum(rate_p_gain, 1e-8)
+        rates_des_final = np.clip(rates_des_final, -max_rate, max_rate)
 
         omega = self.quad.mixer(U1_final, tau_final)
 
@@ -419,6 +427,7 @@ class DroneDropoutRLEnv(gym.Env):
             pos_ref,
             vel_ref,
             freeze_z_integrator=is_drop,
+            control_profile="dropout" if is_drop else "nominal",
         )
         pid_ctrl = self._apply_dropout_baseline_safeguards(
             pid_ctrl,
@@ -521,6 +530,7 @@ class DroneDropoutRLEnv(gym.Env):
             next_ref_pos,
             next_ref_vel,
             freeze_z_integrator=bool(self.env.dropout_mgr.active),
+            control_profile="dropout" if self.env.dropout_mgr.active else "nominal",
         )
         next_pid_preview = self._apply_dropout_baseline_safeguards(
             next_pid_preview,

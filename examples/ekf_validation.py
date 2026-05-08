@@ -43,6 +43,7 @@ from phoenix_drone_simulation.envs.followpath_dropout_mission import (
 )
 from phoenix_drone_simulation.envs.sensors import SensorNoise
 from AI_UAV_Tests.quadcopter_env import QuadcopterPID
+from AI_UAV_Tests.sensors_ekf import EKFSensorNoise
 from AI_UAV_Tests.quadcopter_ekf import (
     QuadcopterEKF, QuadcopterPhysicalParams, PhoenixEKFAdapter, STATE_DIM,
 )
@@ -54,6 +55,10 @@ DROPOUT_START    = 5.0   # s — when GPS blackout begins
 DROPOUT_DURATION = 4.0   # s — how long the blackout lasts
 CI_ALPHA         = 0.05  # two-sided, giving 95 % confidence intervals
 FIG_DPI          = 150
+PSEUDO_VEL_STD_XY = 0.10
+PSEUDO_VEL_STD_Z = 0.08
+GPS_RECOVERY_GATE_THRESHOLD = 11.34
+GPS_RECOVERY_GATE_DURATION_S = 0.5
 
 # Colour palette
 C_EKF  = "#1565C0"   # dark blue  — EKF estimates
@@ -118,17 +123,26 @@ def nis_norm_bounds(n: int, dof: int, alpha: float = CI_ALPHA):
 
 # -- environment helpers -------------------------------------------------------
 
-def _build_mission() -> FlightMission:
+def _build_mission(trajectory: str = "circle") -> FlightMission:
     m = FlightMission(default_z=1.0, ground_z=0.0)
-    m.add_takeoff(duration=3.0, target_z=1.0)
-    # m.add_circle(duration=12.0, radius=0.5, period=12.0, z=1.0, center_xy=(0.0, 0.0))
-    m.add_hover(duration=2.0, z=1.0)
-    # m.add_landing(duration=6.0, ground_z=0.055)
-    return m
+    trajectory = str(trajectory)
+    if trajectory == "circle":
+        m.add_takeoff(duration=3.0, target_z=1.0)
+        m.add_hover(duration=1.0, z=1.0)
+        m.add_circle(duration=12.0, radius=1.0, period=12.0, z=1.0, center_xy=(-1.0, 0.0))
+        m.add_hover(duration=2.0, z=1.0)
+        m.add_landing(duration=6.0, ground_z=0.055)
+        return m
+    if trajectory == "hover":
+        m.add_takeoff(duration=3.0, target_z=1.0)
+        m.add_hover(duration=8.0, z=1.0)
+        m.add_landing(duration=6.0, ground_z=0.055)
+        return m
+    raise ValueError(f"Unsupported validation trajectory: {trajectory}")
 
 
-def _make_env():
-    mission = _build_mission()
+def _make_env(trajectory: str = "circle"):
+    mission = _build_mission(trajectory)
     env = DroneFollowPathDropoutMissionEnv(
         trajectory_fn=mission,
         physics="PyBulletPhysics",
@@ -146,15 +160,23 @@ def _thrust_to_action(U1: float, mass: float, g: float = 9.81) -> float:
     return float(np.clip((U1 / (mass * g) - 0.9) / 0.4, -1.0, 1.0))
 
 
-def _apply_dropout_schedule(env, t: float, triggered: bool, done: bool) -> tuple[bool, bool]:
+def _apply_dropout_schedule(
+    env,
+    t: float,
+    triggered: bool,
+    done: bool,
+    *,
+    dropout_start: float,
+    dropout_duration: float,
+) -> tuple[bool, bool]:
     """Trigger / clear dropout at the scheduled times. Returns (triggered, done)."""
     if done:
         return triggered, done
-    if not triggered and t >= DROPOUT_START:
+    if not triggered and t >= dropout_start:
         env.dropout_mgr.mode = "HOV"
         env.trigger_dropout()
         return True, False
-    if triggered and t >= DROPOUT_START + DROPOUT_DURATION:
+    if triggered and t >= dropout_start + dropout_duration:
         env.clear_dropout()
         return True, True
     return triggered, done
@@ -183,10 +205,17 @@ def validate_jacobian() -> tuple:
 
 # -- EKF trial runner ----------------------------------------------------------
 
-def run_ekf_trial(seed: int = 0, with_dropout: bool = True) -> TrialLog:
+def run_ekf_trial(
+    seed: int = 0,
+    with_dropout: bool = True,
+    *,
+    trajectory: str = "circle",
+    dropout_start: float = DROPOUT_START,
+    dropout_duration: float = DROPOUT_DURATION,
+) -> TrialLog:
     """One full episode with EKF state feedback to the PID controller."""
     np.random.seed(seed)
-    env, mission = _make_env()
+    env, mission = _make_env(trajectory)
     env.reset()
 
     adapter = PhoenixEKFAdapter(dt=env.TIME_STEP)
@@ -206,28 +235,42 @@ def run_ekf_trial(seed: int = 0, with_dropout: bool = True) -> TrialLog:
     quad.reset()
 
     log = TrialLog()
-    noise_gen = SensorNoise()
+    noise_gen = EKFSensorNoise(
+        sample_turn_on_bias_once=True,
+        gyro_turn_on_bias_sigma=0.0,
+    )
     steps = int(mission.total_time / env.TIME_STEP)
     drop_triggered, drop_done = False, False
     _prev_drop = False
     dropout_elapsed = 0.0
     last_valid_ref = np.array([0.0, 0.0, 1.0], dtype=float)
     last_ctrl_pos  = env.drone.xyz.copy()
+    ref_prev_pos = np.asarray(env.get_mission_reference(), dtype=float).copy()
+    gps_recovery_time_left = 0.0
 
     for _ in range(steps):
         t = float(env.mission_time)
 
         if with_dropout:
             drop_triggered, drop_done = _apply_dropout_schedule(
-                env, t, drop_triggered, drop_done
+                env,
+                t,
+                drop_triggered,
+                drop_done,
+                dropout_start=dropout_start,
+                dropout_duration=dropout_duration,
             )
 
         is_drop = bool(env.dropout_mgr.active)
 
         if is_drop:
-            pos_ref = last_valid_ref.copy()
-            vel_ref = np.zeros(3, dtype=float)
+            if not _prev_drop:
+                ref_prev_pos = np.asarray(env.get_mission_reference(), dtype=float).copy()
+            pos_ref = np.asarray(env.get_mission_reference(), dtype=float)
+            vel_ref = (pos_ref - ref_prev_pos) / float(env.TIME_STEP)
         else:
+            if _prev_drop:
+                gps_recovery_time_left = GPS_RECOVERY_GATE_DURATION_S
             pos_ref, vel_ref = env.current_reference()
             pos_ref = np.asarray(pos_ref, dtype=float)
             vel_ref = np.asarray(vel_ref, dtype=float)
@@ -253,52 +296,90 @@ def run_ekf_trial(seed: int = 0, with_dropout: bool = True) -> TrialLog:
 
         env.step(action)
 
-        # -- EKF predict + update (mirrors PhoenixEKFAdapter.step) ---------
+        noisy_pos, noisy_vel, noisy_att, noisy_rates, _ = noise_gen.add_noise(
+            np.asarray(env.drone.xyz, dtype=float),
+            np.asarray(env.drone.xyz_dot, dtype=float),
+            np.asarray(env.drone.rpy, dtype=float),
+            np.asarray(env.drone.rpy_dot, dtype=float),
+            np.zeros(3, dtype=float),
+            env.TIME_STEP,
+        )
+        baro_z = noise_gen.add_noise_to_baro(float(env.drone.xyz[2]))
+
+        # -- EKF predict + update ------------------------------------------
         if is_drop:
             if not _prev_drop:
-                ekf.decouple_all_groups()   # zero all cross-cov at onset
                 dropout_elapsed = 0.0
             dropout_elapsed += env.TIME_STEP
-            # Use hover omega (not PID omega_cmd) so altitude-integrator windup
-            # does not drive the EKF position estimate to tens of metres.
             ekf.predict_dropout(
                 omega=_omega_hover,
                 dt=env.TIME_STEP,
                 dropout_time=dropout_elapsed,
             )
-            # IMU (attitude + body rates) is still available during GPS dropout.
-            # Updating att/rate keeps the attitude estimate accurate, which in turn
-            # keeps the thrust-direction prediction correct for position dead-reckoning.
-            # n_att and n_rate were computed above in the PID inject block.
-            z_imu, H_imu, R_imu = ekf.build_measurement(attitude=n_att, rates=n_rate)
-            innov_imu = ekf.innovation(z_imu, H_imu)
-            S_imu     = H_imu @ ekf.P @ H_imu.T + R_imu
-            nis_v     = _nis(innov_imu, S_imu) / z_imu.size
-            ekf.update(z_imu, H_imu, R_imu)
         else:
-            if _prev_drop:
-                ekf.decouple_all_groups()   # zero cross-cov again at recovery
             dropout_elapsed = 0.0
             ekf.predict(omega=ctrl["omega_cmd"], dt=env.TIME_STEP)
-            # Add realistic sensor noise so the filter operates as designed
-            # (Q/R were calibrated for noisy measurements, not clean ground truth).
-            n_pos, n_vel, n_att, n_rate, _ = noise_gen.add_noise(
-                env.drone.xyz, env.drone.xyz_dot,
-                env.drone.rpy, env.drone.rpy_dot,
-                np.zeros(3, dtype=float), env.TIME_STEP,
+
+        nis_terms = []
+        measurement_dim = 0
+
+        def _apply_update(
+            component: tuple[np.ndarray, np.ndarray, np.ndarray],
+            *,
+            gate_threshold: float | None = None,
+        ) -> None:
+            nonlocal measurement_dim
+            z_u, H_u, R_u = component
+            innov_u = ekf.innovation(z_u, H_u)
+            S_u = H_u @ ekf.P @ H_u.T + R_u
+            nis_terms.append(_nis(innov_u, S_u))
+            measurement_dim += int(np.asarray(z_u, dtype=float).size)
+            ekf.update(
+                measurement=z_u,
+                H=H_u,
+                measurement_noise=R_u,
+                gate_threshold=gate_threshold,
             )
-            z, H, R = ekf.build_measurement(
-                position=n_pos,
-                velocity=n_vel,
-                attitude=n_att,
-                rates=n_rate,
+
+        if is_drop:
+            for component in (
+                ekf.build_attitude_measurement(noisy_att),
+                ekf.build_gyro_measurement(noisy_rates),
+                ekf.build_velocity_pseudo_measurement(
+                    vel_ref,
+                    std_xy=PSEUDO_VEL_STD_XY,
+                    std_z=PSEUDO_VEL_STD_Z,
+                ),
+                ekf.build_baro_measurement(
+                    baro_z,
+                    std=noise_gen.baro_noise_std,
+                ),
+            ):
+                _apply_update(component)
+        else:
+            for component in (
+                ekf.build_attitude_measurement(noisy_att),
+                ekf.build_gyro_measurement(noisy_rates),
+                ekf.build_velocity_measurement(noisy_vel),
+                ekf.build_baro_measurement(
+                    baro_z,
+                    std=noise_gen.baro_noise_std,
+                ),
+            ):
+                _apply_update(component)
+            gps_gate_threshold = (
+                GPS_RECOVERY_GATE_THRESHOLD if gps_recovery_time_left > 0.0 else None
             )
-            innov  = ekf.innovation(z, H)
-            S_mat  = H @ ekf.P @ H.T + R
-            nis_v  = _nis(innov, S_mat) / z.size   # normalise by DOF -> expect ~ 1
-            ekf.update(z, H, R)
+            _apply_update(
+                ekf.build_gps_measurement(noisy_pos),
+                gate_threshold=gps_gate_threshold,
+            )
+            gps_recovery_time_left = max(0.0, gps_recovery_time_left - env.TIME_STEP)
+
+        nis_v = sum(nis_terms) / float(max(1, measurement_dim))
 
         _prev_drop = is_drop
+        ref_prev_pos = pos_ref.copy()
 
         # -- NEES (ground-truth 12-state) -----------------------------------
         x_true  = np.concatenate([env.drone.xyz,  env.drone.xyz_dot,
@@ -326,13 +407,20 @@ def run_ekf_trial(seed: int = 0, with_dropout: bool = True) -> TrialLog:
 
 # -- Raw-sensor PID trial runner -----------------------------------------------
 
-def run_raw_trial(seed: int = 0, with_dropout: bool = True) -> TrialLog:
+def run_raw_trial(
+    seed: int = 0,
+    with_dropout: bool = True,
+    *,
+    trajectory: str = "circle",
+    dropout_start: float = DROPOUT_START,
+    dropout_duration: float = DROPOUT_DURATION,
+) -> TrialLog:
     """
     One full episode where the PID controller receives unfiltered noisy sensor
     readings directly — no EKF.  During dropout the last known position is held.
     """
     np.random.seed(seed)
-    env, mission = _make_env()
+    env, mission = _make_env(trajectory)
     env.reset()
 
     noise_gen = SensorNoise()
@@ -351,7 +439,12 @@ def run_raw_trial(seed: int = 0, with_dropout: bool = True) -> TrialLog:
 
         if with_dropout:
             drop_triggered, drop_done = _apply_dropout_schedule(
-                env, t, drop_triggered, drop_done
+                env,
+                t,
+                drop_triggered,
+                drop_done,
+                dropout_start=dropout_start,
+                dropout_duration=dropout_duration,
             )
 
         is_drop = bool(env.dropout_mgr.active)
@@ -403,14 +496,37 @@ def run_raw_trial(seed: int = 0, with_dropout: bool = True) -> TrialLog:
 
 # -- Monte Carlo runner --------------------------------------------------------
 
-def run_monte_carlo(n: int, with_dropout: bool = True):
+def run_monte_carlo(
+    n: int,
+    with_dropout: bool = True,
+    *,
+    trajectory: str = "circle",
+    dropout_start: float = DROPOUT_START,
+    dropout_duration: float = DROPOUT_DURATION,
+):
     ekf_logs, raw_logs = [], []
     wall0 = time.time()
     for i in range(n):
         t0 = time.time()
         print(f"  Trial {i+1:3d}/{n} ", end="", flush=True)
-        ekf_logs.append(run_ekf_trial(seed=i, with_dropout=with_dropout))
-        raw_logs.append(run_raw_trial(seed=i, with_dropout=with_dropout))
+        ekf_logs.append(
+            run_ekf_trial(
+                seed=i,
+                with_dropout=with_dropout,
+                trajectory=trajectory,
+                dropout_start=dropout_start,
+                dropout_duration=dropout_duration,
+            )
+        )
+        raw_logs.append(
+            run_raw_trial(
+                seed=i,
+                with_dropout=with_dropout,
+                trajectory=trajectory,
+                dropout_start=dropout_start,
+                dropout_duration=dropout_duration,
+            )
+        )
         print(f"({time.time() - t0:.1f} s)")
     print(f"  Total wall-clock: {time.time() - wall0:.1f} s\n")
     return ekf_logs, raw_logs
@@ -733,12 +849,20 @@ def print_summary(ekf_logs, raw_logs, min_len: int, n: int):
 # -- argument parsing ----------------------------------------------------------
 
 def parse_args():
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description="Run EKF validation for trajectory tracking with optional GPS dropout."
+    )
     p.add_argument("--n-trials",   type=int,  default=30,
                    help="Number of Monte Carlo trials (default: 30)")
     p.add_argument("--no-dropout", action="store_true",
                    help="Run without GPS dropout (straight trajectory tracking)")
+    p.add_argument("--trajectory", type=str, default="circle",
+                   choices=["circle", "hover"],
+                   help="Validation mission trajectory.")
+    p.add_argument("--dropout-start", type=float, default=DROPOUT_START,
+                   help="GPS dropout start time in seconds.")
+    p.add_argument("--dropout-duration", type=float, default=DROPOUT_DURATION,
+                   help="GPS dropout duration in seconds.")
     p.add_argument("--save-dir",   type=str,  default=None, metavar="DIR",
                    help="Directory to save PNG figures (created if absent)")
     p.add_argument("--show",       action="store_true",
@@ -760,10 +884,17 @@ def main():
     n        = args.n_trials
     dropout  = not args.no_dropout
     save_dir = args.save_dir
+    scenario = "no_dropout" if not dropout else f"dropout_{args.dropout_duration:g}s"
+    if save_dir:
+        save_dir = str(Path(save_dir) / f"{args.trajectory}_{scenario}")
 
     print(f"\n{'=' * 52}")
     print(f"  EKF Validation Suite")
-    print(f"  n_trials = {n}    dropout = {'ON' if dropout else 'OFF'}")
+    print(f"  trajectory = {args.trajectory}")
+    print(
+        f"  n_trials = {n}    dropout = "
+        f"{'OFF' if not dropout else f'ON ({args.dropout_start:.1f}s to {args.dropout_start + args.dropout_duration:.1f}s)'}"
+    )
     if save_dir:
         print(f"  save_dir = {save_dir}")
     print(f"{'=' * 52}\n")
@@ -775,7 +906,13 @@ def main():
 
     # -- Step 2: Monte Carlo trials ----------------------------------------
     print(f"\n[2/3]  Running {n} × 2 Monte Carlo trials ...")
-    ekf_logs, raw_logs = run_monte_carlo(n, with_dropout=dropout)
+    ekf_logs, raw_logs = run_monte_carlo(
+        n,
+        with_dropout=dropout,
+        trajectory=args.trajectory,
+        dropout_start=args.dropout_start,
+        dropout_duration=args.dropout_duration,
+    )
     min_len = min(
         min(len(lg.t) for lg in ekf_logs),
         min(len(lg.t) for lg in raw_logs),
