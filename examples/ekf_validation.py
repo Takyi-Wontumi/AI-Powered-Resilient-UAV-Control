@@ -55,8 +55,17 @@ DROPOUT_START    = 5.0   # s — when GPS blackout begins
 DROPOUT_DURATION = 4.0   # s — how long the blackout lasts
 CI_ALPHA         = 0.05  # two-sided, giving 95 % confidence intervals
 FIG_DPI          = 150
-PSEUDO_VEL_STD_XY = 0.10
-PSEUDO_VEL_STD_Z = 0.08
+PSEUDO_VEL_STD_XY = 2.10
+PSEUDO_VEL_STD_Z = 4.00
+EKF_SIGMA_ACC_XY = 1.15
+EKF_SIGMA_ACC_Z = 1.55
+EKF_Q_VEL_FLOOR = 2.5e-3
+EKF_Q_ANG_FLOOR = 2.0e-4
+EKF_Q_RATE_FLOOR = 3.0e-3
+EKF_SIGMA_GYRO_BIAS = 0.001
+EKF_Q_BIAS_FLOOR = 1.0e-8
+EKF_INITIAL_GYRO_BIAS_STD = 0.001
+VALIDATION_MEAS_R_SCALE = 1.80
 GPS_RECOVERY_GATE_THRESHOLD = 11.34
 GPS_RECOVERY_GATE_DURATION_S = 0.5
 
@@ -68,7 +77,7 @@ C_BAND = "#90CAF9"   # light blue — confidence band fill
 C_DROP = "#F57F17"   # amber      — dropout highlight
 C_COV  = "#A5D6A7"   # mint       — covariance envelope fill
 
-STATE_LABELS = ["x", "y", "z", "vx", "vy", "vz", "φ", "θ", "ψ", "p", "q", "r"]
+STATE_LABELS = ["x", "y", "z", "vx", "vy", "vz", "φ", "θ", "ψ", "p", "q", "r", "bgx", "bgy", "bgz"]
 
 # -- data container ------------------------------------------------------------
 
@@ -80,11 +89,13 @@ class TrialLog:
     truth_vel:    list = field(default_factory=list)   # (3,) ground-truth velocity
     truth_att:    list = field(default_factory=list)   # (3,) ground-truth attitude
     truth_rate:   list = field(default_factory=list)   # (3,) ground-truth body rates
+    truth_bias:   list = field(default_factory=list)   # (3,) ground-truth gyro bias
     est_pos:      list = field(default_factory=list)   # (3,) estimated position
     est_vel:      list = field(default_factory=list)   # (3,) estimated velocity
     est_att:      list = field(default_factory=list)   # (3,) estimated attitude
     est_rate:     list = field(default_factory=list)   # (3,) estimated body rates
-    cov_diag:     list = field(default_factory=list)   # (12,) diag(P)  — EKF only
+    est_bias:     list = field(default_factory=list)   # (3,) estimated gyro bias
+    cov_diag:     list = field(default_factory=list)   # (15,) diag(P)  — EKF only
     nees:         list = field(default_factory=list)   # scalar NEES    — EKF only
     nis_norm:     list = field(default_factory=list)   # NIS / DOF      — EKF only
     dropout_mask: list = field(default_factory=list)   # bool
@@ -98,8 +109,27 @@ class TrialLog:
 
 def _nees(x_est: np.ndarray, x_true: np.ndarray, P: np.ndarray) -> float:
     """Normalized Estimation Error Squared: e^T P^{-1} e."""
+    x_est = np.asarray(x_est, dtype=float).reshape(-1)
+    x_true = np.asarray(x_true, dtype=float).reshape(-1)
+    P = np.asarray(P, dtype=float)
+    if x_est.size != x_true.size:
+        raise ValueError(f"x_est and x_true must have same length, got {x_est.size} and {x_true.size}")
+    if P.shape != (x_est.size, x_est.size):
+        raise ValueError(f"P must have shape {(x_est.size, x_est.size)}, got {P.shape}")
     e = x_est - x_true
-    return float(e @ np.linalg.solve(P + 1e-12 * np.eye(STATE_DIM), e))
+    return float(e @ np.linalg.solve(P + 1e-12 * np.eye(x_est.size), e))
+
+
+def _true_gyro_bias(sensor_noise: EKFSensorNoise) -> np.ndarray:
+    turn_on_bias = np.asarray(
+        getattr(sensor_noise, "gyro_turn_on_bias", np.zeros(3, dtype=float)),
+        dtype=float,
+    ).reshape(3)
+    colored_bias = np.asarray(
+        getattr(sensor_noise, "gyro_bias", np.zeros(3, dtype=float)),
+        dtype=float,
+    ).reshape(3)
+    return turn_on_bias + colored_bias
 
 
 def _nis(innov: np.ndarray, S: np.ndarray) -> float:
@@ -160,6 +190,30 @@ def _thrust_to_action(U1: float, mass: float, g: float = 9.81) -> float:
     return float(np.clip((U1 / (mass * g) - 0.9) / 0.4, -1.0, 1.0))
 
 
+def _reset_pid_integrators(quad: QuadcopterPID) -> None:
+    quad.z_int = 0.0
+    quad.att_int[:] = 0.0
+    quad.rate_int[:] = 0.0
+
+
+def _motor_omega_from_applied_forces(env, ekf: QuadcopterEKF) -> np.ndarray:
+    motor_forces = np.asarray(env.drone.y, dtype=float).reshape(4)
+    thrust_coeff = float(ekf.params.b)
+    return np.sqrt(np.clip(motor_forces, 0.0, np.inf) / thrust_coeff)
+
+
+def _scale_measurement_component(
+    component: tuple[np.ndarray, np.ndarray, np.ndarray],
+    scale: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    z, H, R = component
+    return (
+        np.asarray(z, dtype=float),
+        np.asarray(H, dtype=float),
+        np.asarray(R, dtype=float) * float(scale),
+    )
+
+
 def _apply_dropout_schedule(
     env,
     t: float,
@@ -190,8 +244,13 @@ def validate_jacobian() -> tuple:
     operating point.
     """
     ekf = QuadcopterEKF(dt=0.002, adapt_noise=True)
-    state = np.array([0.10, -0.05, 1.00,   0.20, 0.10, -0.03,
-                      0.05, -0.03, 0.08,   0.01, -0.02,  0.005])
+    state = np.array([
+        0.10, -0.05, 1.00,
+        0.20, 0.10, -0.03,
+        0.05, -0.03, 0.08,
+        0.01, -0.02, 0.005,
+        0.0, 0.0, 0.0,
+    ])
     omega = np.array([252.0, 248.0, 253.0, 250.0])
 
     F_nu = ekf._numerical_jacobian(lambda s: ekf.dynamics(s, omega), state)
@@ -218,7 +277,30 @@ def run_ekf_trial(
     env, mission = _make_env(trajectory)
     env.reset()
 
-    adapter = PhoenixEKFAdapter(dt=env.TIME_STEP)
+    ekf_model = QuadcopterEKF(
+        dt=env.TIME_STEP,
+        sigma_acc_xy=EKF_SIGMA_ACC_XY,
+        sigma_acc_z=EKF_SIGMA_ACC_Z,
+        q_vel_floor=EKF_Q_VEL_FLOOR,
+        q_ang_floor=EKF_Q_ANG_FLOOR,
+        q_rate_floor=EKF_Q_RATE_FLOOR,
+        sigma_gyro_bias=EKF_SIGMA_GYRO_BIAS,
+        q_bias_floor=EKF_Q_BIAS_FLOOR,
+        initial_cov_diag=np.array(
+            [
+                0.05, 0.05, 0.05,
+                0.10, 0.10, 0.10,
+                0.05, 0.05, 0.05,
+                0.10, 0.10, 0.10,
+                EKF_INITIAL_GYRO_BIAS_STD,
+                EKF_INITIAL_GYRO_BIAS_STD,
+                EKF_INITIAL_GYRO_BIAS_STD,
+            ],
+            dtype=float,
+        ),
+    )
+    adapter = PhoenixEKFAdapter(dt=env.TIME_STEP, ekf=ekf_model, use_attitude_measurements=True)
+    adapter.decouple_after_s = None
     adapter.reset(env.drone.xyz, env.drone.xyz_dot, env.drone.rpy, env.drone.rpy_dot)
     ekf: QuadcopterEKF = adapter.ekf
 
@@ -228,9 +310,6 @@ def run_ekf_trial(
     # instead of the hover ~221 rad/s.  Feeding that into the EKF dynamics produces
     # a ~7 m/s² upward acceleration for 4 s, driving the Z estimate to ~57 m.
     # Using hover omega decouples the EKF prediction from the integral-windup bias.
-    _p = ekf.params
-    _omega_hover = np.full(4, float(np.sqrt(_p.m * _p.g / (4.0 * _p.b))))
-
     quad = QuadcopterPID(dt=env.TIME_STEP)
     quad.reset()
 
@@ -245,7 +324,7 @@ def run_ekf_trial(
     dropout_elapsed = 0.0
     last_valid_ref = np.array([0.0, 0.0, 1.0], dtype=float)
     last_ctrl_pos  = env.drone.xyz.copy()
-    ref_prev_pos = np.asarray(env.get_mission_reference(), dtype=float).copy()
+    dropout_hold_pos = np.asarray(env.get_mission_reference(), dtype=float).copy()
     gps_recovery_time_left = 0.0
 
     for _ in range(steps):
@@ -265,9 +344,16 @@ def run_ekf_trial(
 
         if is_drop:
             if not _prev_drop:
-                ref_prev_pos = np.asarray(env.get_mission_reference(), dtype=float).copy()
-            pos_ref = np.asarray(env.get_mission_reference(), dtype=float)
-            vel_ref = (pos_ref - ref_prev_pos) / float(env.TIME_STEP)
+                dropout_hold_pos = np.asarray(ekf.position, dtype=float).copy()
+                dropout_hold_pos[2] = float(last_valid_ref[2])
+                ekf.P[0:2, 0:2] *= 160.0
+                ekf.P[2, 2] *= 16.0
+                ekf.P[3:5, 3:5] *= 96.0
+                ekf.P[5, 5] *= 12.0
+                _reset_pid_integrators(quad)
+            pos_ref = last_valid_ref.copy()
+            pos_ref[:2] = dropout_hold_pos[:2]
+            vel_ref = np.zeros(3, dtype=float)
         else:
             if _prev_drop:
                 gps_recovery_time_left = GPS_RECOVERY_GATE_DURATION_S
@@ -288,7 +374,13 @@ def run_ekf_trial(
             est = ekf.as_dict()
             quad.inject_external_state(est["x"], est["v"], est["ang"], est["rate"])
             last_ctrl_pos = np.asarray(est["x"]).copy()
-        ctrl = quad.step(pos_ref, vel_ref, z_ref=float(pos_ref[2]))
+        ctrl = quad.step(
+            pos_ref,
+            vel_ref,
+            z_ref=float(pos_ref[2]),
+            freeze_z_integrator=True,
+            control_profile="dropout" if is_drop else "nominal",
+        )
 
         action = np.zeros(4, dtype=np.float32)
         action[0]   = _thrust_to_action(ctrl["thrust_cmd"], quad.m, quad.g)
@@ -307,18 +399,19 @@ def run_ekf_trial(
         baro_z = noise_gen.add_noise_to_baro(float(env.drone.xyz[2]))
 
         # -- EKF predict + update ------------------------------------------
+        omega_applied = _motor_omega_from_applied_forces(env, ekf)
         if is_drop:
             if not _prev_drop:
                 dropout_elapsed = 0.0
             dropout_elapsed += env.TIME_STEP
             ekf.predict_dropout(
-                omega=_omega_hover,
+                omega=omega_applied,
                 dt=env.TIME_STEP,
                 dropout_time=dropout_elapsed,
             )
         else:
             dropout_elapsed = 0.0
-            ekf.predict(omega=ctrl["omega_cmd"], dt=env.TIME_STEP)
+            ekf.predict(omega=omega_applied, dt=env.TIME_STEP)
 
         nis_terms = []
         measurement_dim = 0
@@ -343,27 +436,48 @@ def run_ekf_trial(
 
         if is_drop:
             for component in (
-                ekf.build_attitude_measurement(noisy_att),
-                ekf.build_gyro_measurement(noisy_rates),
+                _scale_measurement_component(
+                    ekf.build_attitude_measurement(noisy_att),
+                    VALIDATION_MEAS_R_SCALE,
+                ),
+                _scale_measurement_component(
+                    ekf.build_gyro_measurement(noisy_rates),
+                    VALIDATION_MEAS_R_SCALE,
+                ),
                 ekf.build_velocity_pseudo_measurement(
                     vel_ref,
                     std_xy=PSEUDO_VEL_STD_XY,
                     std_z=PSEUDO_VEL_STD_Z,
                 ),
-                ekf.build_baro_measurement(
-                    baro_z,
-                    std=noise_gen.baro_noise_std,
+                _scale_measurement_component(
+                    ekf.build_baro_measurement(
+                        baro_z,
+                        std=noise_gen.baro_noise_std,
+                    ),
+                    VALIDATION_MEAS_R_SCALE,
                 ),
             ):
                 _apply_update(component)
         else:
             for component in (
-                ekf.build_attitude_measurement(noisy_att),
-                ekf.build_gyro_measurement(noisy_rates),
-                ekf.build_velocity_measurement(noisy_vel),
-                ekf.build_baro_measurement(
-                    baro_z,
-                    std=noise_gen.baro_noise_std,
+                _scale_measurement_component(
+                    ekf.build_attitude_measurement(noisy_att),
+                    VALIDATION_MEAS_R_SCALE,
+                ),
+                _scale_measurement_component(
+                    ekf.build_gyro_measurement(noisy_rates),
+                    VALIDATION_MEAS_R_SCALE,
+                ),
+                _scale_measurement_component(
+                    ekf.build_velocity_measurement(noisy_vel),
+                    VALIDATION_MEAS_R_SCALE,
+                ),
+                _scale_measurement_component(
+                    ekf.build_baro_measurement(
+                        baro_z,
+                        std=noise_gen.baro_noise_std,
+                    ),
+                    VALIDATION_MEAS_R_SCALE,
                 ),
             ):
                 _apply_update(component)
@@ -371,7 +485,10 @@ def run_ekf_trial(
                 GPS_RECOVERY_GATE_THRESHOLD if gps_recovery_time_left > 0.0 else None
             )
             _apply_update(
-                ekf.build_gps_measurement(noisy_pos),
+                _scale_measurement_component(
+                    ekf.build_gps_measurement(noisy_pos),
+                    VALIDATION_MEAS_R_SCALE,
+                ),
                 gate_threshold=gps_gate_threshold,
             )
             gps_recovery_time_left = max(0.0, gps_recovery_time_left - env.TIME_STEP)
@@ -379,11 +496,15 @@ def run_ekf_trial(
         nis_v = sum(nis_terms) / float(max(1, measurement_dim))
 
         _prev_drop = is_drop
-        ref_prev_pos = pos_ref.copy()
 
-        # -- NEES (ground-truth 12-state) -----------------------------------
-        x_true  = np.concatenate([env.drone.xyz,  env.drone.xyz_dot,
-                                   env.drone.rpy,  env.drone.rpy_dot])
+        # -- NEES (ground-truth 15-state with gyro bias) --------------------
+        x_true  = np.concatenate([
+            env.drone.xyz,
+            env.drone.xyz_dot,
+            env.drone.rpy,
+            env.drone.rpy_dot,
+            _true_gyro_bias(noise_gen),
+        ])
         nees_v  = _nees(ekf.x, x_true, ekf.P)
 
         log.t.append(t)
@@ -391,10 +512,12 @@ def run_ekf_trial(
         log.truth_vel.append(env.drone.xyz_dot.copy())
         log.truth_att.append(env.drone.rpy.copy())
         log.truth_rate.append(env.drone.rpy_dot.copy())
+        log.truth_bias.append(_true_gyro_bias(noise_gen).copy())
         log.est_pos.append(ekf.position.copy())
         log.est_vel.append(ekf.velocity.copy())
         log.est_att.append(ekf.attitude.copy())
         log.est_rate.append(ekf.body_rates.copy())
+        log.est_bias.append(ekf.gyro_bias.copy())
         log.cov_diag.append(np.diag(ekf.P).copy())
         log.nees.append(nees_v)
         log.nis_norm.append(nis_v)
@@ -569,10 +692,13 @@ def plot_jacobian(F_an, F_nu, err, save_dir=None):
     def _hm(ax, mat, title, cmap, vmin=None, vmax=None):
         im = ax.imshow(mat, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
         ax.set_title(title, fontsize=11)
-        ax.set_xticks(range(12))
-        ax.set_xticklabels(STATE_LABELS, fontsize=7, rotation=45)
-        ax.set_yticks(range(12))
-        ax.set_yticklabels(STATE_LABELS, fontsize=7)
+        n_rows, n_cols = mat.shape
+        x_labels = STATE_LABELS[:n_cols]
+        y_labels = STATE_LABELS[:n_rows]
+        ax.set_xticks(range(n_cols))
+        ax.set_xticklabels(x_labels, fontsize=7, rotation=45)
+        ax.set_yticks(range(n_rows))
+        ax.set_yticklabels(y_labels, fontsize=7)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     lim = max(np.abs(F_an).max(), np.abs(F_nu).max())
@@ -699,12 +825,14 @@ def plot_coverage(ekf_logs, min_len: int, n_sigma: float = 3.0, save_dir=None):
                 np.array(lg.truth_vel[:min_len]),
                 np.array(lg.truth_att[:min_len]),
                 np.array(lg.truth_rate[:min_len]),
+                np.array(lg.truth_bias[:min_len]),
             ])[:, dim]
             est = np.hstack([
                 np.array(lg.est_pos[:min_len]),
                 np.array(lg.est_vel[:min_len]),
                 np.array(lg.est_att[:min_len]),
                 np.array(lg.est_rate[:min_len]),
+                np.array(lg.est_bias[:min_len]),
             ])[:, dim]
             per_trial.append((np.abs(est - truth) < n_sigma * sigma).mean())
         coverage[dim] = float(np.mean(per_trial))

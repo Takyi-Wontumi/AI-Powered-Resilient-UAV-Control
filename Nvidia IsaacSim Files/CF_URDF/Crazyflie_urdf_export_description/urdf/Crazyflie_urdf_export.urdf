@@ -1,0 +1,28 @@
+<?xml version="1.0" ?>
+<robot name="Crazyflie_urdf_export" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:include filename="$(find Crazyflie_urdf_export_description)/urdf/materials.xacro" />
+<xacro:include filename="$(find Crazyflie_urdf_export_description)/urdf/Crazyflie_urdf_export.trans" />
+<xacro:include filename="$(find Crazyflie_urdf_export_description)/urdf/Crazyflie_urdf_export.gazebo" />
+<link name="base_link">
+  <inertial>
+    <origin xyz="0.027097043469975192 0.03539766215623361 0.03715654729286946" rpy="0 0 0"/>
+    <mass value="0.009895319104368135"/>
+    <inertia ixx="5e-06" iyy="5e-06" izz="9e-06" ixy="-0.0" iyz="-0.0" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Crazyflie_urdf_export_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Crazyflie_urdf_export_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+</robot>

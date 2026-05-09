@@ -24,7 +24,7 @@ from phoenix_drone_simulation.envs.followpath_dropout_mission import (
     DroneFollowPathDropoutMissionEnv,
 )
 from AI_UAV_Tests.quadcopter_env import QuadcopterPID
-from AI_UAV_Tests.quadcopter_ekf import PhoenixEKFAdapter
+from AI_UAV_Tests.quadcopter_ekf import PhoenixEKFAdapter, QuadcopterEKF
 from AI_UAV_Tests.sensors_ekf import EKFSensorNoise
 from AI_UAV_Tests.trajectories_library import FlightMission
 
@@ -38,8 +38,11 @@ AUTO_DROPOUT_PHASE_WINDOWS = (
 TRAIL_BLUE = [0.10, 0.35, 0.95]
 TRAIL_RED = [0.95, 0.15, 0.15]
 RECOVERY_POS_ERR_THRESHOLD_M = 0.15
-PSEUDO_VEL_STD_XY = 1.20
-PSEUDO_VEL_STD_Z = 2.50
+PSEUDO_VEL_STD_XY = 2.10
+PSEUDO_VEL_STD_Z = 4.00
+EKF_SIGMA_GYRO_BIAS = 0.001
+EKF_Q_BIAS_FLOOR = 1.0e-8
+EKF_INITIAL_GYRO_BIAS_STD = 0.001
 GPS_RECOVERY_GATE_THRESHOLD = 11.34
 GPS_RECOVERY_GATE_DURATION_S = 0.5
 RECOVERY_BLEND_DURATION_S = 1.5
@@ -87,6 +90,18 @@ def compute_group_nees(
 def compute_nis(innovation: np.ndarray, S: np.ndarray) -> float:
     innovation = np.asarray(innovation, dtype=float)
     return float(innovation @ np.linalg.solve(S, innovation))
+
+
+def true_gyro_bias_from_sensor_noise(sensor_noise: EKFSensorNoise) -> np.ndarray:
+    turn_on_bias = np.asarray(
+        getattr(sensor_noise, "gyro_turn_on_bias", np.zeros(3, dtype=float)),
+        dtype=float,
+    ).reshape(3)
+    colored_bias = np.asarray(
+        getattr(sensor_noise, "gyro_bias", np.zeros(3, dtype=float)),
+        dtype=float,
+    ).reshape(3)
+    return turn_on_bias + colored_bias
 
 
 def format_dropout_schedule() -> str:
@@ -289,8 +304,26 @@ def main():
     quad = QuadcopterPID(dt=env.TIME_STEP)
     quad.reset()
 
+    ekf_model = QuadcopterEKF(
+        dt=env.TIME_STEP,
+        sigma_gyro_bias=EKF_SIGMA_GYRO_BIAS,
+        q_bias_floor=EKF_Q_BIAS_FLOOR,
+        initial_cov_diag=np.array(
+            [
+                0.05, 0.05, 0.05,
+                0.10, 0.10, 0.10,
+                0.05, 0.05, 0.05,
+                0.10, 0.10, 0.10,
+                EKF_INITIAL_GYRO_BIAS_STD,
+                EKF_INITIAL_GYRO_BIAS_STD,
+                EKF_INITIAL_GYRO_BIAS_STD,
+            ],
+            dtype=float,
+        ),
+    )
     ekf = PhoenixEKFAdapter(
         dt=env.TIME_STEP,
+        ekf=ekf_model,
         use_attitude_measurements=True,
     )
     # Example-level dropout tuning: reduce covariance inflation and disable
@@ -729,6 +762,7 @@ def main():
                 np.asarray(env.drone.xyz_dot, dtype=float),
                 np.asarray(env.drone.rpy, dtype=float),
                 np.asarray(env.drone.rpy_dot, dtype=float),
+                true_gyro_bias_from_sensor_noise(ekf.sensor_noise),
             ]
         )
         nees = ekf.ekf.compute_nees(x_true)
@@ -816,6 +850,8 @@ def main():
         }
         pos_err_vec = estimate_arr - true_arr
         pos_err_norm = np.linalg.norm(pos_err_vec, axis=1)
+        lateral_err_norm = np.linalg.norm(pos_err_vec[:, :2], axis=1)
+        altitude_err_abs = np.abs(pos_err_vec[:, 2])
         pos_err_ref_norm = np.linalg.norm(estimate_arr - ref_arr, axis=1)
 
         if not args.no_plot:
@@ -974,6 +1010,22 @@ def main():
                 f"max position error vs truth={max_err_true:.3f} m"
             )
 
+        def print_lateral_altitude_block(label: str, mask: np.ndarray) -> None:
+            sample_count = int(np.count_nonzero(mask))
+            if sample_count == 0:
+                print(f"{label}: no samples")
+                return
+            lateral_rmse = float(np.sqrt(np.mean(lateral_err_norm[mask] ** 2)))
+            lateral_max = float(np.max(lateral_err_norm[mask]))
+            altitude_rmse = float(np.sqrt(np.mean(altitude_err_abs[mask] ** 2)))
+            altitude_max = float(np.max(altitude_err_abs[mask]))
+            print(
+                f"{label}: lateral RMSE={lateral_rmse:.3f} m  "
+                f"lateral max={lateral_max:.3f} m  "
+                f"altitude RMSE={altitude_rmse:.3f} m  "
+                f"altitude max={altitude_max:.3f} m"
+            )
+
         def print_group_nees_block(label: str, mask: np.ndarray) -> None:
             sample_count = int(np.count_nonzero(mask))
             if sample_count == 0:
@@ -1037,6 +1089,8 @@ def main():
         print_group_nees_block("Dropout grouped NEES", dropout_mask)
         print_position_block("Nominal position errors", nominal_mask)
         print_position_block("Dropout position errors", dropout_mask)
+        print_lateral_altitude_block("Nominal lateral/altitude errors", nominal_mask)
+        print_lateral_altitude_block("Dropout lateral/altitude errors", dropout_mask)
         print_sensor_nis_block("Nominal per-sensor NIS", nominal_mask)
         print_sensor_nis_block("Dropout per-sensor NIS", dropout_mask)
         print_recovery_block()

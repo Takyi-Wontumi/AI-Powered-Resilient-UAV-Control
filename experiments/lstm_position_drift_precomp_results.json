@@ -1,0 +1,48 @@
+{
+  "timestamp": "2026-05-09T14:02:16.531335",
+  "model": "lstm_position_drift",
+  "description": "Predicts EKF dead-reckoning drift from velocity+gyro history",
+  "architecture": {
+    "input_features": [
+      "vx",
+      "vy",
+      "vz",
+      "wx",
+      "wy",
+      "wz",
+      "t_norm"
+    ],
+    "seq_len": 300,
+    "hidden_size": 256,
+    "num_layers": 1,
+    "bidirectional": false,
+    "horizon_steps": 7,
+    "horizon_ms": [
+      500,
+      1000,
+      1500,
+      2000,
+      2500,
+      3000,
+      3500
+    ],
+    "total_params": 761365
+  },
+  "dataset": {
+    "total_sequences": 1500,
+    "missions": 5
+  },
+  "results": {
+    "best_val_loss": 0.05004919692873955,
+    "test_loss": 0.05585418967530131,
+    "horizon_mae_cm": [
+      38.95472288131714,
+      38.981398567557335,
+      38.3491475135088,
+      39.638736471533775,
+      39.19433429837227,
+      38.17974850535393,
+      40.39783924818039
+    ]
+  }
+}

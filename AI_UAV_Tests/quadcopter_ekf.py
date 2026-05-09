@@ -1,7 +1,7 @@
 """Extended Kalman filter for the quadcopter state used in AI_UAV_Tests.
 
-State ordering matches the controller/env files:
-    [x, y, z, vx, vy, vz, roll, pitch, yaw, p, q, r]
+State ordering matches the controller/env files, extended with gyro bias:
+    [x, y, z, vx, vy, vz, roll, pitch, yaw, p, q, r, b_gx, b_gy, b_gz]
 
 The filter is intentionally standalone:
     - `predict(omega)` propagates the nonlinear quadcopter dynamics
@@ -19,12 +19,15 @@ import numpy as np
 from AI_UAV_Tests.sensors_ekf import EKFSensorNoise
 
 
-STATE_DIM = 12
+DYNAMIC_STATE_DIM = 12
+BIAS_STATE_DIM = 3
+STATE_DIM = DYNAMIC_STATE_DIM + BIAS_STATE_DIM
 
 POS_IDX = slice(0, 3)
 VEL_IDX = slice(3, 6)
 ANG_IDX = slice(6, 9)
 RATE_IDX = slice(9, 12)
+GYRO_BIAS_IDX = slice(12, 15)
 
 _EKF_Q_SCALE = 1.0
 _EKF_R_SCALE = 1.0
@@ -82,12 +85,14 @@ def _build_structured_process_noise(
     sigma_acc_z: float,
     sigma_ang_rate_xy: float,
     sigma_ang_rate_z: float,
+    sigma_gyro_bias: float,
     q_pos_floor: float = 5.0e-6,
     q_vel_floor: float = 5.0e-4,
     q_ang_floor: float = 1.0e-4,
     q_rate_floor: float = 2.0e-3,
+    q_bias_floor: float = 1.0e-5,
 ) -> np.ndarray:
-    """Build a structured Q for translational and angular integrated states."""
+    """Build a structured Q for translational, angular, and gyro-bias states."""
     Q = np.zeros((STATE_DIM, STATE_DIM), dtype=float)
 
     lin_xy = _continuous_white_accel_block(dt, sigma_acc_xy)
@@ -104,6 +109,9 @@ def _build_structured_process_noise(
         Q[np.ix_([ang_idx, rate_idx], [ang_idx, rate_idx])] = block
         Q[ang_idx, ang_idx] += float(q_ang_floor)
         Q[rate_idx, rate_idx] += float(q_rate_floor)
+
+    bias_var = (float(sigma_gyro_bias) ** 2) * float(dt) + float(q_bias_floor)
+    Q[GYRO_BIAS_IDX, GYRO_BIAS_IDX] = np.eye(BIAS_STATE_DIM, dtype=float) * bias_var
 
     return Q * _EKF_Q_SCALE
 
@@ -129,7 +137,7 @@ class QuadcopterPhysicalParams:
 
 
 class QuadcopterEKF:
-    """12-state EKF aligned with the quadcopter env/controller state."""
+    """15-state EKF aligned with the quadcopter env/controller state."""
 
     def __init__(
         self,
@@ -143,10 +151,12 @@ class QuadcopterEKF:
         sigma_acc_z: float = 1.0,
         sigma_ang_rate_xy: float = 0.4,
         sigma_ang_rate_z: float = 0.6,
+        sigma_gyro_bias: float = 0.02,
         q_pos_floor: float = 5.0e-6,
         q_vel_floor: float = 5.0e-4,
         q_ang_floor: float = 2.0e-4,
         q_rate_floor: float = 3.0e-3,
+        q_bias_floor: float = 1.0e-5,
     ):
         self.dt = float(dt)
         self.params = params or QuadcopterPhysicalParams()
@@ -155,20 +165,32 @@ class QuadcopterEKF:
         self.sigma_acc_z = float(sigma_acc_z)
         self.sigma_ang_rate_xy = float(sigma_ang_rate_xy)
         self.sigma_ang_rate_z = float(sigma_ang_rate_z)
+        self.sigma_gyro_bias = float(sigma_gyro_bias)
         self.q_pos_floor = float(q_pos_floor)
         self.q_vel_floor = float(q_vel_floor)
         self.q_ang_floor = float(q_ang_floor)
         self.q_rate_floor = float(q_rate_floor)
+        self.q_bias_floor = float(q_bias_floor)
         self._uses_custom_process_noise = process_noise_diag is not None
 
         if process_noise_diag is None:
             process_noise = self._default_process_noise(self.dt)
         else:
             process_noise = np.asarray(process_noise_diag, dtype=float)
-            if process_noise.shape == (STATE_DIM,):
+            if process_noise.shape == (DYNAMIC_STATE_DIM,):
+                bias_var = (self.sigma_gyro_bias ** 2) * self.dt + self.q_bias_floor
+                expanded = np.zeros(STATE_DIM, dtype=float)
+                expanded[:DYNAMIC_STATE_DIM] = process_noise
+                expanded[GYRO_BIAS_IDX] = bias_var
+                process_noise = np.diag(expanded)
+            elif process_noise.shape == (STATE_DIM,):
                 process_noise = np.diag(process_noise)
+            elif process_noise.shape == (DYNAMIC_STATE_DIM, DYNAMIC_STATE_DIM):
+                expanded = self._default_process_noise(self.dt)
+                expanded[:DYNAMIC_STATE_DIM, :DYNAMIC_STATE_DIM] = process_noise
+                process_noise = expanded
             elif process_noise.shape != (STATE_DIM, STATE_DIM):
-                raise ValueError("process_noise_diag must have shape (12,) or (12, 12)")
+                raise ValueError("process_noise_diag must have shape (12,), (15,), (12, 12), or (15, 15)")
 
         if measurement_noise_diag is None:
             measurement_noise_diag = _sensor_measurement_noise_diag(
@@ -193,9 +215,20 @@ class QuadcopterEKF:
                     0.10,
                     0.10,
                     0.10,
+                    0.02,
+                    0.02,
+                    0.02,
                 ],
                 dtype=float,
             )
+        else:
+            initial_cov_diag = np.asarray(initial_cov_diag, dtype=float).reshape(-1)
+            if initial_cov_diag.size == DYNAMIC_STATE_DIM:
+                initial_cov_diag = np.concatenate(
+                    [initial_cov_diag, np.full(BIAS_STATE_DIM, 0.02, dtype=float)]
+                )
+            elif initial_cov_diag.size != STATE_DIM:
+                raise ValueError("initial_cov_diag must have length 12 or 15")
 
         self.P0 = np.diag(np.asarray(initial_cov_diag, dtype=float))
         self.x = np.zeros(STATE_DIM, dtype=float)
@@ -215,10 +248,12 @@ class QuadcopterEKF:
             sigma_acc_z=self.sigma_acc_z,
             sigma_ang_rate_xy=self.sigma_ang_rate_xy,
             sigma_ang_rate_z=self.sigma_ang_rate_z,
+            sigma_gyro_bias=self.sigma_gyro_bias,
             q_pos_floor=self.q_pos_floor,
             q_vel_floor=self.q_vel_floor,
             q_ang_floor=self.q_ang_floor,
             q_rate_floor=self.q_rate_floor,
+            q_bias_floor=self.q_bias_floor,
         )
 
     def reset(
@@ -229,14 +264,23 @@ class QuadcopterEKF:
         if state is None:
             self.x = np.zeros(STATE_DIM, dtype=float)
         else:
-            self.x = np.asarray(state, dtype=float).reshape(STATE_DIM).copy()
+            state_arr = np.asarray(state, dtype=float).reshape(-1)
+            if state_arr.size == DYNAMIC_STATE_DIM:
+                state_arr = np.concatenate([state_arr, np.zeros(BIAS_STATE_DIM, dtype=float)])
+            elif state_arr.size != STATE_DIM:
+                raise ValueError("state must have length 12 or 15")
+            self.x = state_arr.copy()
 
         if covariance is None:
             self.P = self.P0.copy()
         else:
             cov = np.asarray(covariance, dtype=float)
-            if cov.shape != (STATE_DIM, STATE_DIM):
-                raise ValueError("covariance must have shape (12, 12)")
+            if cov.shape == (DYNAMIC_STATE_DIM, DYNAMIC_STATE_DIM):
+                expanded = self.P0.copy()
+                expanded[:DYNAMIC_STATE_DIM, :DYNAMIC_STATE_DIM] = cov
+                cov = expanded
+            elif cov.shape != (STATE_DIM, STATE_DIM):
+                raise ValueError("covariance must have shape (12, 12) or (15, 15)")
             self.P = cov.copy()
 
     @property
@@ -254,6 +298,10 @@ class QuadcopterEKF:
     @property
     def body_rates(self) -> np.ndarray:
         return self.x[RATE_IDX].copy()
+
+    @property
+    def gyro_bias(self) -> np.ndarray:
+        return self.x[GYRO_BIAS_IDX].copy()
 
     @staticmethod
     def _wrap_angle(angle: float) -> float:
@@ -349,6 +397,9 @@ class QuadcopterEKF:
                 p_dot,
                 q_dot,
                 r_dot,
+                0.0,
+                0.0,
+                0.0,
             ],
             dtype=float,
         )
@@ -407,7 +458,7 @@ class QuadcopterEKF:
         else:
             process_noise = np.asarray(process_noise, dtype=float)
         if process_noise.shape != (STATE_DIM, STATE_DIM):
-            raise ValueError("process_noise must have shape (12, 12)")
+            raise ValueError("process_noise must have shape (15, 15)")
 
         transition = lambda state: self._rk4_step(state, omega, dt)
         F = self._numerical_jacobian(transition, self.x)
@@ -430,6 +481,7 @@ class QuadcopterEKF:
         att_scale = 1.0 + 1.10 * dropout_time
         rate_scale = 1.0 + 1.40 * dropout_time
         yaw_scale = 1.0 + 1.75 * dropout_time
+        bias_scale = 1.0 + 0.40 * dropout_time
 
         Q[0:2, 0:2] *= xy_pos_scale
         Q[2, 2] *= z_pos_scale
@@ -439,6 +491,7 @@ class QuadcopterEKF:
         Q[9:12, 9:12] *= rate_scale
         Q[8, 8] *= yaw_scale
         Q[11, 11] *= yaw_scale
+        Q[GYRO_BIAS_IDX, GYRO_BIAS_IDX] *= bias_scale
         return Q
 
     def predict_dropout(
@@ -535,7 +588,12 @@ class QuadcopterEKF:
         return measurement, H, R
 
     def build_gyro_measurement(self, rates: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        return self.build_measurement(rates=rates)
+        measurement = np.asarray(rates, dtype=float).reshape(3)
+        H = np.zeros((3, STATE_DIM), dtype=float)
+        H[:, RATE_IDX] = np.eye(3, dtype=float)
+        H[:, GYRO_BIAS_IDX] = np.eye(3, dtype=float)
+        R = self.default_measurement_noise([9, 10, 11])
+        return measurement, H, R
 
     def build_attitude_measurement(self, attitude: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         return self.build_measurement(attitude=attitude)
@@ -582,27 +640,32 @@ class QuadcopterEKF:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Create z, H, R for common direct state measurements."""
         z_parts = []
-        indices = []
+        H_blocks = []
+        noise_indices = []
 
         if position is not None:
             z_parts.append(np.asarray(position, dtype=float).reshape(3))
-            indices.extend(range(0, 3))
+            H_blocks.append(self.measurement_matrix([0, 1, 2]))
+            noise_indices.extend(range(0, 3))
         if velocity is not None:
             z_parts.append(np.asarray(velocity, dtype=float).reshape(3))
-            indices.extend(range(3, 6))
+            H_blocks.append(self.measurement_matrix([3, 4, 5]))
+            noise_indices.extend(range(3, 6))
         if attitude is not None:
             z_parts.append(np.asarray(attitude, dtype=float).reshape(3))
-            indices.extend(range(6, 9))
+            H_blocks.append(self.measurement_matrix([6, 7, 8]))
+            noise_indices.extend(range(6, 9))
         if rates is not None:
             z_parts.append(np.asarray(rates, dtype=float).reshape(3))
-            indices.extend(range(9, 12))
+            H_blocks.append(self.build_gyro_measurement(rates)[1])
+            noise_indices.extend(range(9, 12))
 
         if not z_parts:
             raise ValueError("at least one measurement block must be provided")
 
         z = np.concatenate(z_parts)
-        H = self.measurement_matrix(indices)
-        R = self.default_measurement_noise(indices)
+        H = np.vstack(H_blocks)
+        R = self.default_measurement_noise(noise_indices)
         return z, H, R
 
     def innovation(self, measurement: np.ndarray, H: np.ndarray) -> np.ndarray:
@@ -633,13 +696,13 @@ class QuadcopterEKF:
         measurement = np.asarray(measurement, dtype=float).reshape(-1)
         H = np.asarray(H, dtype=float)
         if H.shape[1] != STATE_DIM:
-            raise ValueError("H must have shape (m, 12)")
+            raise ValueError("H must have shape (m, 15)")
         if H.shape[0] != measurement.size:
             raise ValueError("measurement size must match H rows")
 
         if measurement_noise is None:
             if H.shape[0] > STATE_DIM:
-                raise ValueError("custom measurement_noise required for m > 12")
+                raise ValueError("custom measurement_noise required for m > 15")
             measurement_noise = self.default_measurement_noise(
                 np.argmax(H, axis=1).tolist()
             )
@@ -699,6 +762,7 @@ class QuadcopterEKF:
             "v": self.velocity,
             "ang": self.attitude,
             "rate": self.body_rates,
+            "gyro_bias": self.gyro_bias,
             "state": self.x.copy(),
             "covariance": self.P.copy(),
         }
@@ -717,16 +781,25 @@ class QuadcopterEKF:
         }
 
     def compute_nees(self, true_state: Sequence[float]) -> float:
-        true_state = np.asarray(true_state, dtype=float).reshape(self.x.shape)
-        error = true_state - self.x
-        for idx in range(ANG_IDX.start, ANG_IDX.stop):
+        true_state = np.asarray(true_state, dtype=float).reshape(-1)
+        if true_state.size == DYNAMIC_STATE_DIM:
+            est_state = self.x[:DYNAMIC_STATE_DIM]
+            cov = self.P[:DYNAMIC_STATE_DIM, :DYNAMIC_STATE_DIM]
+        elif true_state.size == STATE_DIM:
+            est_state = self.x
+            cov = self.P
+        else:
+            raise ValueError("true_state must have length 12 or 15")
+
+        error = true_state - est_state
+        for idx in range(ANG_IDX.start, min(ANG_IDX.stop, error.size)):
             error[idx] = self._wrap_angle(error[idx])
-        return float(error.T @ np.linalg.solve(self.P, error))
+        return float(error.T @ np.linalg.solve(cov, error))
 
     def decouple_all_groups(self):
-        """Zeros out all cross-correlations: pos/vel <-> att/rates during dropout."""
-        self.P[0:6, 6:12] = 0
-        self.P[6:12, 0:6] = 0
+        """Zeros out all cross-correlations: pos/vel <-> att/rates/bias during dropout."""
+        self.P[0:6, 6:STATE_DIM] = 0
+        self.P[6:STATE_DIM, 0:6] = 0
 
 
 class PhoenixEKFAdapter:
@@ -766,13 +839,20 @@ class PhoenixEKFAdapter:
         velocity: Sequence[float],
         attitude: Sequence[float],
         rates: Sequence[float],
+        gyro_bias: Sequence[float] | None = None,
     ) -> np.ndarray:
+        gyro_bias_vec = (
+            np.zeros(3, dtype=float)
+            if gyro_bias is None
+            else np.asarray(gyro_bias, dtype=float).reshape(3)
+        )
         return np.concatenate(
             [
                 np.asarray(position, dtype=float).reshape(3),
                 np.asarray(velocity, dtype=float).reshape(3),
                 np.asarray(attitude, dtype=float).reshape(3),
                 np.asarray(rates, dtype=float).reshape(3),
+                gyro_bias_vec,
             ]
         )
 
@@ -782,12 +862,13 @@ class PhoenixEKFAdapter:
         velocity: Sequence[float],
         attitude: Sequence[float],
         rates: Sequence[float],
+        gyro_bias: Sequence[float] | None = None,
         covariance: np.ndarray | None = None,
     ) -> None:
         self.sensor_noise.reset()
         self.dropout_time = 0.0
         self.ekf.reset(
-            state=self._state_vector(position, velocity, attitude, rates),
+            state=self._state_vector(position, velocity, attitude, rates, gyro_bias=gyro_bias),
             covariance=covariance,
         )
 

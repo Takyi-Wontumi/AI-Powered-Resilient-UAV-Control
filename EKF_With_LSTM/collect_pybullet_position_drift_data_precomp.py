@@ -14,12 +14,11 @@ so it cannot predict drift during turns.
 
 THIS COLLECTOR
 --------------
-  - Uses the EXACT same DroneMissionEnv + QuadcopterPID + KalmanFilterINS stack as
-    demo_adaptive_search_v3_hybrid_mission_gui.py
+  - Uses DroneMissionEnv + QuadcopterPID + the tuned 15-state QuadcopterEKF
   - Records env.drone.xyz_dot and obs[10:13] — the same signals stored in the
     demo's imu_buffer_a / imu_buffer_g at inference time
-  - Runs the same 3.5×2.5m perimeter/zigzag/spiral patterns as the demo
-  - Measures dead-reckoning drift via a "shadow" KF that never receives GPS
+  - Runs circle / hover / square / figure-8 patterns for quick residual-learning data
+  - Measures dropout EKF drift via a "shadow" 15-state EKF that never receives GPS
 
 OUTPUT FORMAT
 -------------
@@ -33,18 +32,86 @@ COMBINING WITH SYNTHETIC DATA
 """
 
 import sys, os
+import argparse
 
 # Force PyBullet into DIRECT (no-GUI) mode before any import
 os.environ['PYBULLET_USE_SHARED_MEMORY'] = '0'
 
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), 'AI_UAV_Tests'))
-sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), 'GPS_Dropout_Recovery'))
+SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+
+for path in [
+    SCRIPT_DIR,
+    ROOT_DIR,
+    os.path.join(ROOT_DIR, "AI_UAV_Tests"),
+    os.path.join(ROOT_DIR, "GPS_Dropout_Recovery"),
+]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 import numpy as np
 import pickle
 from datetime import datetime
 from pathlib import Path
+
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Collect precomputed PyBullet position-drift missions for LSTM training."
+    )
+    p.add_argument(
+        "--patterns",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated pattern list to sample from, for example "
+            "'square,hover,circle,helix'. Overrides --pattern."
+        ),
+    )
+    p.add_argument(
+        "--pattern",
+        choices=["square", "circle", "hover", "figure8", "helix", "mixed"],
+        default="square",
+        help=(
+            "Mission pattern to collect. 'mixed' samples across the recommended "
+            "training mix: square, hover, circle, helix."
+        ),
+    )
+    p.add_argument(
+        "--num-missions",
+        type=int,
+        default=600,
+        help="Number of missions to collect.",
+    )
+    p.add_argument(
+        "--steps-per-mission",
+        type=int,
+        default=6000,
+        help="Simulation steps per mission.",
+    )
+    p.add_argument(
+        "--save-dir",
+        type=str,
+        default="data/position_drift",
+        help="Directory where the dataset pickle will be written.",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for repeatable quick runs.",
+    )
+    p.add_argument(
+        "--square-points-per-edge",
+        type=int,
+        default=6,
+        help="Waypoint density for square missions.",
+    )
+    return p.parse_args()
+
+
+args = parse_args()
+np.random.seed(args.seed)
 
 print("\n" + "="*100)
 print("COLLECT POSITION-DRIFT TRAINING DATA FROM PYBULLET")
@@ -53,17 +120,53 @@ print("="*100 + "\n")
 # =========================================================
 # Configuration
 # =========================================================
-NUM_MISSIONS     = 600    # target missions — high-volume run
-STEPS_PER_MISSION = 6000  # 30s at 200 Hz — needed for 2500-step reset windows
+NUM_MISSIONS     = int(args.num_missions)   # target missions — high-volume run
+STEPS_PER_MISSION = int(args.steps_per_mission)  # 30s at 200 Hz — needed for 2500-step reset windows
 SHADOW_RESET_INTERVAL = 2500  # re-anchor shadow KF every 12.5s — covers 10s+ dropouts
-SAVE_DIR         = Path('data/position_drift')
+SAVE_DIR         = Path(args.save_dir)
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
+PSEUDO_VEL_STD_XY = 2.10
+PSEUDO_VEL_STD_Z = 4.00
+EKF_SIGMA_GYRO_BIAS = 0.001
+EKF_Q_BIAS_FLOOR = 1.0e-8
+EKF_INITIAL_GYRO_BIAS_STD = 0.001
+EKF_INITIAL_COV_DIAG = np.array(
+    [
+        0.05, 0.05, 0.05,
+        0.10, 0.10, 0.10,
+        0.05, 0.05, 0.05,
+        0.10, 0.10, 0.10,
+        EKF_INITIAL_GYRO_BIAS_STD,
+        EKF_INITIAL_GYRO_BIAS_STD,
+        EKF_INITIAL_GYRO_BIAS_STD,
+    ],
+    dtype=float,
+)
 
-# Pattern distribution: heavily oversample zigzag + perimeter (corner-heavy).
-# Hover added so model learns zero-velocity = zero-drift.
-# Spiral is already well-learnt; minimal allocation.
-PATTERNS         = ['perimeter', 'zigzag', 'spiral', 'hover']
-PATTERN_WEIGHTS  = [0.40, 0.40, 0.10, 0.10]
+SUPPORTED_PATTERNS = {"square", "circle", "hover", "figure8", "helix"}
+
+
+def resolve_pattern_mix():
+    if args.patterns is not None:
+        patterns = [p.strip().lower() for p in str(args.patterns).split(",") if p.strip()]
+        invalid = [p for p in patterns if p not in SUPPORTED_PATTERNS]
+        if invalid:
+            raise ValueError(
+                f"Unsupported pattern(s) in --patterns: {invalid}. "
+                f"Supported: {sorted(SUPPORTED_PATTERNS)}"
+            )
+        if not patterns:
+            raise ValueError("No valid patterns were provided to --patterns.")
+        return patterns, [1.0 / len(patterns)] * len(patterns)
+
+    if args.pattern == "mixed":
+        patterns = ["square", "hover", "circle", "helix"]
+        return patterns, [0.25, 0.25, 0.25, 0.25]
+
+    return [str(args.pattern)], [1.0]
+
+
+PATTERNS, PATTERN_WEIGHTS = resolve_pattern_mix()
 
 # =========================================================
 # Imports
@@ -73,10 +176,11 @@ try:
     from phoenix_drone_simulation.envs.control import AttitudeRate
     from phoenix_drone_simulation.envs.mission import DroneMissionEnv
     from quadcopter_env import QuadcopterPID
-    from kalman_filter_ins import KalmanFilterINS
+    from AI_UAV_Tests.quadcopter_ekf import QuadcopterEKF
+    from AI_UAV_Tests.sensors_ekf import EKFSensorNoise
 except ImportError as e:
     print(f"  ERROR: {e}")
-    print("  Ensure phoenix_drone_simulation, quadcopter_env, kalman_filter_ins are on sys.path")
+    print("  Ensure phoenix_drone_simulation, quadcopter_env, quadcopter_ekf, sensors_ekf are on sys.path")
     sys.exit(1)
 print("    [OK]\n")
 
@@ -85,7 +189,7 @@ print("    [OK]\n")
 # Search-pattern generator  (matches demo exactly)
 # =========================================================
 class AdaptiveSearchPatternGenerator:
-    """Generates same waypoint patterns as the demo (3.5×2.5m field)."""
+    """Generates compact training trajectories on a 3.5×2.5m field."""
 
     def __init__(self, area_size=(3.5, 2.5), altitude=1.0):
         self.x_min = -area_size[0] / 2
@@ -95,65 +199,101 @@ class AdaptiveSearchPatternGenerator:
         self.z     = altitude
         self.area_size = area_size
 
-    def perimeter_search(self, num_laps=3, randomness=0.12):
-        """Dense rectangular perimeter — same as demo perimeter_search.
-        50% of calls run clockwise (wz<0 at corners) for chirality diversity."""
+    def circle_search(self, num_points=36, radius_scale=0.45, randomness=0.04):
+        """Circle trajectory centered in the workspace with random chirality."""
         wps = []
-        perim = 2*(self.x_max-self.x_min) + 2*(self.y_max-self.y_min)
-        ppl   = max(8, int(round(perim * 2.4)))   # ~29 pts/lap on 3.5x2.5m
-        dx, dy = self.x_max-self.x_min, self.y_max-self.y_min
-        for i in range(ppl * num_laps):
-            frac = (i % ppl) / ppl
-            p    = frac * perim
-            if   p < dx:          x, y = self.x_min + p,        self.y_min
-            elif p < dx + dy:     x, y = self.x_max,             self.y_min + (p - dx)
-            elif p < 2*dx + dy:   x, y = self.x_max - (p-dx-dy), self.y_max
-            else:                 x, y = self.x_min,             self.y_max - (p-2*dx-dy)
-            x += np.random.uniform(-randomness, randomness) * dx * 0.1
-            y += np.random.uniform(-randomness, randomness) * dy * 0.1
-            wps.append(np.array([np.clip(x, self.x_min, self.x_max),
-                                  np.clip(y, self.y_min, self.y_max),
-                                  self.z]))
-        if np.random.random() < 0.5:   # flip to clockwise 50% of the time
-            wps = wps[::-1]
+        radius = min(self.x_max - self.x_min, self.y_max - self.y_min) * radius_scale
+        chirality = 1.0 if np.random.random() < 0.5 else -1.0
+        cx = np.random.uniform(self.x_min * 0.15, self.x_max * 0.15)
+        cy = np.random.uniform(self.y_min * 0.15, self.y_max * 0.15)
+        for i in range(num_points):
+            theta = chirality * 2.0 * np.pi * i / num_points
+            x = cx + radius * np.cos(theta) + np.random.randn() * randomness
+            y = cy + radius * np.sin(theta) + np.random.randn() * randomness
+            wps.append(np.array([
+                np.clip(x, self.x_min, self.x_max),
+                np.clip(y, self.y_min, self.y_max),
+                self.z,
+            ]))
         return np.array(wps)
 
-    def zigzag_search(self, num_passes=8, randomness=0.15):
-        """Lawnmower zigzag — same as demo zigzag_search.
-        50% of calls sweep y in reverse (south-to-north vs north-to-south)
-        and 50% flip the initial row direction for full turn-signature diversity."""
+    def square_search(self, side_scale=0.55, points_per_edge=8, randomness=0.03):
+        """Square perimeter with random chirality and small waypoint jitter."""
         wps = []
-        y_spacing = (self.y_max - self.y_min) / (num_passes + 1)
-        reverse_y    = np.random.random() < 0.5  # sweep direction: low->high or high->low
-        flip_x_start = np.random.random() < 0.5  # which end starts first
-        for i in range(num_passes):
-            yi = (num_passes - 1 - i) if reverse_y else i
-            y  = self.y_min + (yi + 1) * y_spacing
-            even = (i % 2 == 0) if not flip_x_start else (i % 2 != 0)
-            xs = self.x_min if even else self.x_max
-            xe = self.x_max if even else self.x_min
-            for j in range(3):   # 3 intermediate points per row
-                x   = xs + (xe - xs) * j / 2
-                yv  = np.clip(y + np.random.uniform(-randomness, randomness) * y_spacing * 0.3,
-                              self.y_min, self.y_max)
-                wps.append(np.array([x, yv, self.z]))
-            if i < num_passes - 1:
-                wps.append(np.array([xe, np.clip(y + y_spacing*0.5, self.y_min, self.y_max), self.z]))
+        side_x = (self.x_max - self.x_min) * side_scale
+        side_y = (self.y_max - self.y_min) * side_scale
+        cx = np.random.uniform(self.x_min * 0.15, self.x_max * 0.15)
+        cy = np.random.uniform(self.y_min * 0.15, self.y_max * 0.15)
+        corners = np.array([
+            [cx - side_x / 2.0, cy - side_y / 2.0, self.z],
+            [cx + side_x / 2.0, cy - side_y / 2.0, self.z],
+            [cx + side_x / 2.0, cy + side_y / 2.0, self.z],
+            [cx - side_x / 2.0, cy + side_y / 2.0, self.z],
+        ])
+        if np.random.random() < 0.5:
+            corners = corners[::-1]
+        for i in range(4):
+            start = corners[i]
+            end = corners[(i + 1) % 4]
+            for j in range(points_per_edge):
+                alpha = j / points_per_edge
+                pt = (1.0 - alpha) * start + alpha * end
+                pt[0] += np.random.randn() * randomness
+                pt[1] += np.random.randn() * randomness
+                pt[0] = np.clip(pt[0], self.x_min, self.x_max)
+                pt[1] = np.clip(pt[1], self.y_min, self.y_max)
+                wps.append(pt.copy())
         return np.array(wps)
 
-    def spiral_search(self, rotations=4, randomness=0.1):
-        """Expanding spiral — same as demo spiral_search.
-        50% of calls run clockwise (negative angular velocity) for chirality diversity."""
+    def figure8_search(self, num_points=48, radius_scale=0.32, randomness=0.03):
+        """Planar figure-8 using a lemniscate-like path."""
         wps = []
-        chirality = 1.0 if np.random.random() < 0.5 else -1.0  # +1=CCW, -1=CW
-        for i in range(40):
-            t      = chirality * 2 * np.pi * rotations * i / 40
-            radius = (self.area_size[0] / 2) * i / 40
-            x = np.clip(radius*np.cos(t) + np.random.randn()*randomness*0.3,
-                        self.x_min, self.x_max)
-            y = np.clip((radius/1.5)*np.sin(t) + np.random.randn()*randomness*0.3,
-                        self.y_min, self.y_max)
-            wps.append(np.array([x, y, self.z]))
+        chirality = 1.0 if np.random.random() < 0.5 else -1.0
+        ax = (self.x_max - self.x_min) * radius_scale
+        ay = (self.y_max - self.y_min) * radius_scale
+        cx = np.random.uniform(self.x_min * 0.10, self.x_max * 0.10)
+        cy = np.random.uniform(self.y_min * 0.10, self.y_max * 0.10)
+        for i in range(num_points):
+            t = chirality * 2.0 * np.pi * i / num_points
+            x = cx + ax * np.sin(t)
+            y = cy + ay * np.sin(t) * np.cos(t)
+            x += np.random.randn() * randomness
+            y += np.random.randn() * randomness
+            wps.append(np.array([
+                np.clip(x, self.x_min, self.x_max),
+                np.clip(y, self.y_min, self.y_max),
+                self.z,
+            ]))
+        return np.array(wps)
+
+    def helix_search(
+        self,
+        num_points=48,
+        radius_scale=0.30,
+        z_amplitude=0.22,
+        turns=1.25,
+        randomness=0.02,
+    ):
+        """Bounded 3D helix for coupled lateral/vertical dropout drift data."""
+        wps = []
+        chirality = 1.0 if np.random.random() < 0.5 else -1.0
+        radius = min(self.x_max - self.x_min, self.y_max - self.y_min) * radius_scale
+        cx = np.random.uniform(self.x_min * 0.10, self.x_max * 0.10)
+        cy = np.random.uniform(self.y_min * 0.10, self.y_max * 0.10)
+        phase = np.random.uniform(0.0, 2.0 * np.pi)
+        for i in range(num_points):
+            theta = chirality * turns * 2.0 * np.pi * i / max(1, num_points - 1)
+            x = cx + radius * np.cos(theta)
+            y = cy + radius * np.sin(theta)
+            z = self.z + z_amplitude * np.sin(theta + phase)
+            x += np.random.randn() * randomness
+            y += np.random.randn() * randomness
+            z += np.random.randn() * (0.5 * randomness)
+            wps.append(np.array([
+                np.clip(x, self.x_min, self.x_max),
+                np.clip(y, self.y_min, self.y_max),
+                np.clip(z, 0.75, 1.25),
+            ]))
         return np.array(wps)
 
     def hover_search(self):
@@ -178,6 +318,24 @@ class AdaptiveSearchPatternGenerator:
 def thrust_to_action(U1, mass, g=9.81):
     hover_T = mass * g
     return float(np.clip((U1 / hover_T - 0.9) / 0.4, -1.0, 1.0))
+
+
+def true_gyro_bias_from_sensor_noise(sensor_noise: EKFSensorNoise) -> np.ndarray:
+    turn_on_bias = np.asarray(
+        getattr(sensor_noise, "gyro_turn_on_bias", np.zeros(3, dtype=float)),
+        dtype=float,
+    ).reshape(3)
+    colored_bias = np.asarray(
+        getattr(sensor_noise, "gyro_bias", np.zeros(3, dtype=float)),
+        dtype=float,
+    ).reshape(3)
+    return turn_on_bias + colored_bias
+
+
+def motor_omega_from_applied_forces(env, ekf_model: QuadcopterEKF) -> np.ndarray:
+    motor_forces = np.asarray(env.drone.y, dtype=float).reshape(4)
+    thrust_coeff = float(ekf_model.params.b)
+    return np.sqrt(np.clip(motor_forces, 0.0, np.inf) / thrust_coeff)
 
 
 # =========================================================
@@ -223,18 +381,28 @@ for mission_idx in range(NUM_MISSIONS):
 
     # ---- Generate waypoints ----
     try:
-        if pattern == 'perimeter':
-            wps = generator.perimeter_search(
-                num_laps=np.random.randint(2, 4),
-                randomness=np.random.uniform(0.05, 0.20))
-        elif pattern == 'zigzag':
-            wps = generator.zigzag_search(
-                num_passes=np.random.randint(5, 10),
-                randomness=np.random.uniform(0.05, 0.25))
-        elif pattern == 'spiral':
-            wps = generator.spiral_search(
-                rotations=np.random.randint(3, 6),
-                randomness=np.random.uniform(0.05, 0.15))
+        if pattern == 'circle':
+            wps = generator.circle_search(
+                num_points=np.random.randint(28, 44),
+                radius_scale=np.random.uniform(0.35, 0.48),
+                randomness=np.random.uniform(0.01, 0.05))
+        elif pattern == 'square':
+            wps = generator.square_search(
+                side_scale=np.random.uniform(0.45, 0.65),
+                points_per_edge=max(3, int(args.square_points_per_edge)),
+                randomness=np.random.uniform(0.01, 0.04))
+        elif pattern == 'figure8':
+            wps = generator.figure8_search(
+                num_points=np.random.randint(36, 56),
+                radius_scale=np.random.uniform(0.25, 0.36),
+                randomness=np.random.uniform(0.01, 0.04))
+        elif pattern == 'helix':
+            wps = generator.helix_search(
+                num_points=np.random.randint(40, 60),
+                radius_scale=np.random.uniform(0.24, 0.34),
+                z_amplitude=np.random.uniform(0.14, 0.26),
+                turns=np.random.uniform(1.0, 1.5),
+                randomness=np.random.uniform(0.01, 0.03))
         else:  # hover
             wps = generator.hover_search()
     except Exception as e:
@@ -257,15 +425,33 @@ for mission_idx in range(NUM_MISSIONS):
     quad = QuadcopterPID(dt=env.TIME_STEP)
     quad.reset()
 
-    kf_ctrl   = KalmanFilterINS(dt=env.TIME_STEP)
-    kf_shadow = KalmanFilterINS(dt=env.TIME_STEP)
-
+    sensor_noise = EKFSensorNoise(
+        sample_turn_on_bias_once=True,
+        gyro_turn_on_bias_sigma=0.0,
+    )
     pos0 = obs[0:3].copy()
     vel0 = env.drone.xyz_dot.copy()
     att0 = env.drone.rpy.copy()
+    rate0 = env.drone.rpy_dot.copy()
 
-    kf_ctrl.set_state(pos0, vel0, att0)
-    kf_shadow.set_state(pos0, vel0, att0)
+    sensor_noise.reset()
+    kf_shadow = QuadcopterEKF(
+        dt=env.TIME_STEP,
+        sigma_gyro_bias=EKF_SIGMA_GYRO_BIAS,
+        q_bias_floor=EKF_Q_BIAS_FLOOR,
+        initial_cov_diag=EKF_INITIAL_COV_DIAG.copy(),
+    )
+    kf_shadow.reset(
+        state=np.concatenate(
+            [
+                pos0,
+                vel0,
+                att0,
+                rate0,
+                true_gyro_bias_from_sensor_noise(sensor_noise),
+            ]
+        )
+    )
 
     # ---- Storage ----
     vel_list    = []
@@ -280,6 +466,13 @@ for mission_idx in range(NUM_MISSIONS):
     WP_TOL      = 0.5
 
     done = False
+
+    # Accelerometer-derived velocity tracking — must mirror demo behavior so the
+    # LSTM is trained on the same EKF dynamics it will see at deployment.
+    v_true_prev = vel0.copy()
+    v_acc_integrated = vel0.copy()
+    ACCEL_VEL_BASE_STD = 0.05
+    ACCEL_VEL_DRIFT_STD = 0.10
 
     for step in range(STEPS_PER_MISSION):
         # ---- Read physics state ----
@@ -315,38 +508,80 @@ for mission_idx in range(NUM_MISSIONS):
         except Exception:
             done = True
 
-        # ---- Gyro from observation (same index as the demo) ----
-        imu_g = obs[10:13] if len(obs) > 12 else rate
-
-        # ---- Control KF: always has GPS — clean position for bookkeeping ----
-        kf_ctrl.x[3:6] = v_true
-        kf_ctrl.x[6:9] = ang
-        kf_ctrl.predict()
-        kf_ctrl.update_with_gps(obs[0:3])
-
-        # ---- Shadow KF: NEVER gets GPS — accumulates dead-reckoning drift ----
-        # Simulates exactly what the demo's EKF does during a GPS dropout window.
-        # Uses the same velocity injection as the demo (v_true → kf.x[3:6]).
-        kf_shadow.x[3:6] = v_true
-        kf_shadow.x[6:9] = ang
-        kf_shadow.predict()
-
-        # Re-anchor shadow KF to true position every SHADOW_RESET_INTERVAL steps.
-        # This simulates a "GPS just recovered and is about to drop out again",
-        # giving us many short windows of realistic drift growth within one mission.
+        # ---- Shadow EKF: reset to truth every window, then run dropout-only updates ----
+        # This simulates repeated short GPS dropout windows using the tuned 15-state EKF.
         if step > 0 and step % SHADOW_RESET_INTERVAL == 0:
-            kf_shadow.set_state(obs[0:3], v_true, ang)
+            kf_shadow.reset(
+                state=np.concatenate(
+                    [
+                        obs[0:3].copy(),
+                        v_true.copy(),
+                        ang.copy(),
+                        rate.copy(),
+                        kf_shadow.gyro_bias.copy(),
+                    ]
+                )
+            )
+            # Re-anchor accel-integrated velocity at each shadow reset window
+            v_acc_integrated = v_true.copy()
+
+        # World-frame acceleration from numerical differentiation, fed into the
+        # noise model so the EKF can use a noisy accel reading during dropout.
+        true_acc_world = (np.asarray(v_true, dtype=float).reshape(3) - v_true_prev) / env.TIME_STEP
+        v_true_prev = np.asarray(v_true, dtype=float).reshape(3).copy()
+
+        noisy_pos, noisy_vel, noisy_att, noisy_rates, noisy_acc = sensor_noise.add_noise(
+            pos=np.asarray(true_pos, dtype=float).reshape(3),
+            vel=np.asarray(v_true, dtype=float).reshape(3),
+            rot=np.asarray(ang, dtype=float).reshape(3),
+            omega=np.asarray(rate, dtype=float).reshape(3),
+            acc=true_acc_world,
+            dt=env.TIME_STEP,
+        )
+
+        # Integrate accel into velocity estimate for the dropout-style update
+        v_acc_integrated = v_acc_integrated + noisy_acc * env.TIME_STEP
+        baro_z = sensor_noise.add_noise_to_baro(float(true_pos[2]))
+        imu_g = noisy_rates.copy()
+
+        omega_predict = motor_omega_from_applied_forces(env, kf_shadow)
+        dropout_time = (step % SHADOW_RESET_INTERVAL) * env.TIME_STEP
+        kf_shadow.predict_dropout(
+            omega=omega_predict,
+            dt=env.TIME_STEP,
+            dropout_time=dropout_time,
+        )
+
+        # Velocity measurement uses accel-integrated estimate (snapshotted at
+        # each shadow reset). Std grows linearly with time-since-reset to model
+        # accumulating integration noise.
+        accel_vel_std = ACCEL_VEL_BASE_STD + ACCEL_VEL_DRIFT_STD * dropout_time
+        update_components = [
+            kf_shadow.build_attitude_measurement(noisy_att),
+            kf_shadow.build_gyro_measurement(noisy_rates),
+            kf_shadow.build_velocity_pseudo_measurement(
+                v_acc_integrated,
+                std_xy=accel_vel_std,
+                std_z=accel_vel_std * 1.5,
+            ),
+            kf_shadow.build_baro_measurement(
+                baro_z,
+                std=sensor_noise.baro_noise_std,
+            ),
+        ]
+        for z_u, H_u, R_u in update_components:
+            kf_shadow.update(measurement=z_u, H=H_u, measurement_noise=R_u)
 
         # Compute time-since-reset feature (normalised 0->1 over one reset window).
         # This tells the model how far into a dropout window it currently is.
         steps_since_reset = step % SHADOW_RESET_INTERVAL
         t_norm = steps_since_reset / SHADOW_RESET_INTERVAL
 
-        # ---- Record (these are exactly the demo's imu_buffer_a and imu_buffer_g) ----
-        vel_list.append(v_true.copy())
+        # ---- Record inputs and EKF-position drift target ----
+        vel_list.append(noisy_vel.copy())
         gyro_list.append(imu_g.copy())
         true_list.append(obs[0:3].copy())
-        dr_list.append(kf_shadow.get_position().copy())
+        dr_list.append(kf_shadow.position.copy())
         t_norm_list.append(np.float32(t_norm))
 
         if done or truncated:
@@ -366,11 +601,12 @@ for mission_idx in range(NUM_MISSIONS):
         'vel_meas':       np.array(vel_list,   dtype=np.float32),   # (T, 3)
         'gyro_meas':      np.array(gyro_list,  dtype=np.float32),   # (T, 3)
         'true_pos':       np.array(true_list,  dtype=np.float32),   # (T, 3)
-        'dr_pos':         np.array(dr_list,    dtype=np.float32),   # (T, 3)
+        'dr_pos':         np.array(dr_list,    dtype=np.float32),   # (T, 3) shadow 15-state EKF position
         't_norm_meas':    np.array(t_norm_list, dtype=np.float32),  # (T,)  time-since-reset 0->1
         'mission_type':   pattern,
         'duration_steps': n,
         'source':         'pybullet_precomp',
+        'estimator':      'quadcopter_ekf_15state',
     })
 
     cum = sum(m['duration_steps'] for m in missions)
@@ -397,4 +633,4 @@ print(f"  Missions collected : {len(missions)}  (skipped: {skipped})")
 print(f"  Total steps        : {total_steps:,}")
 print(f"  Pattern mix        : {pattern_counts}")
 print(f"  Saved to           : {out_path.name}")
-print(f"\nNext: run train_lstm_position_drift.py to retrain on combined dataset.")
+print(f"\nNext: run train_lstm_position_drift_precomp.py to train on this tuned 15-state EKF dataset.")

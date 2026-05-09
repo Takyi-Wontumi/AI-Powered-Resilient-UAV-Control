@@ -16,9 +16,17 @@ Load order:
 """
 
 import sys, os
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), 'AI_UAV_Tests'))
-sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), 'GPS_Dropout_Recovery'))
+SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+
+for path in [
+    SCRIPT_DIR,
+    ROOT_DIR,
+    os.path.join(ROOT_DIR, 'AI_UAV_Tests'),
+    os.path.join(ROOT_DIR, 'GPS_Dropout_Recovery'),
+]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 import time
 import numpy as np

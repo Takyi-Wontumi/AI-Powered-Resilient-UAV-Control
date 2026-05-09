@@ -54,7 +54,8 @@ from pathlib import Path
 from phoenix_drone_simulation.envs.control import AttitudeRate
 from phoenix_drone_simulation.envs.mission import DroneMissionEnv
 from AI_UAV_Tests.quadcopter_env import QuadcopterPID
-from kalman_filter_ins import KalmanFilterINS
+from AI_UAV_Tests.quadcopter_ekf import QuadcopterEKF
+from AI_UAV_Tests.sensors_ekf import EKFSensorNoise
 
 # ── Constants (must match data collector / precomp trainer) ───────────────────
 SHADOW_RESET_INTERVAL = 2500    # steps between EKF resets in collector
@@ -68,6 +69,11 @@ BUFFER_LEN            = 300     # IMU history length (same as training)
 MAX_WAYPOINT_SHIFT    = 0.25    # metres — hard cap on adjusted waypoint displacement (V11)
 
 LSTM_MODEL_PATH = Path(_DIR) / 'experiments' / 'lstm_position_drift_precomp.pt'
+PSEUDO_VEL_STD_XY = 2.10
+PSEUDO_VEL_STD_Z = 4.00
+EKF_SIGMA_GYRO_BIAS = 0.001
+EKF_Q_BIAS_FLOOR = 1.0e-8
+EKF_INITIAL_GYRO_BIAS_STD = 0.001
 
 
 # ── LSTM architecture (must mirror train_lstm_position_drift_precomp.py) ──────
@@ -90,6 +96,24 @@ class PositionDriftLSTMPrecomp(nn.Module):
         lstm_out, _ = self.lstm(x)
         final = lstm_out[:, -1, :]
         return torch.stack([h(final) for h in self.heads], dim=1)  # (B, 7, 3)
+
+
+def _true_gyro_bias_from_sensor_noise(sensor_noise):
+    turn_on_bias = np.asarray(
+        getattr(sensor_noise, "gyro_turn_on_bias", np.zeros(3, dtype=float)),
+        dtype=float,
+    ).reshape(3)
+    colored_bias = np.asarray(
+        getattr(sensor_noise, "gyro_bias", np.zeros(3, dtype=float)),
+        dtype=float,
+    ).reshape(3)
+    return turn_on_bias + colored_bias
+
+
+def _motor_omega_from_applied_forces(env, ekf_model: QuadcopterEKF) -> np.ndarray:
+    motor_forces = np.asarray(env.drone.y, dtype=float).reshape(4)
+    thrust_coeff = float(ekf_model.params.b)
+    return np.sqrt(np.clip(motor_forces, 0.0, np.inf) / thrust_coeff)
 
 
 # ── Search pattern generator (mirrors demo_adaptive_search_v3_hybrid_precomp) ─
@@ -221,7 +245,27 @@ class UAVPrecompEnv(gymnasium.Env):
 
         # Controllers (reset inside reset())
         self.quad = QuadcopterPID(dt=self.dt)
-        self.kf   = KalmanFilterINS(dt=self.dt)
+        self.kf = QuadcopterEKF(
+            dt=self.dt,
+            sigma_gyro_bias=EKF_SIGMA_GYRO_BIAS,
+            q_bias_floor=EKF_Q_BIAS_FLOOR,
+            initial_cov_diag=np.array(
+                [
+                    0.05, 0.05, 0.05,
+                    0.10, 0.10, 0.10,
+                    0.05, 0.05, 0.05,
+                    0.10, 0.10, 0.10,
+                    EKF_INITIAL_GYRO_BIAS_STD,
+                    EKF_INITIAL_GYRO_BIAS_STD,
+                    EKF_INITIAL_GYRO_BIAS_STD,
+                ],
+                dtype=float,
+            ),
+        )
+        self.ekf_noise = EKFSensorNoise(
+            sample_turn_on_bias_once=True,
+            gyro_turn_on_bias_sigma=0.0,
+        )
 
         # Episode state — populated by reset()
         self.waypoints           = None
@@ -288,7 +332,18 @@ class UAVPrecompEnv(gymnasium.Env):
 
         # Reset controllers
         self.quad.reset()
-        self.kf.set_state(obs[0:3], self._penv.drone.xyz_dot, self._penv.drone.rpy)
+        self.ekf_noise.reset()
+        self.kf.reset(
+            state=np.concatenate(
+                [
+                    obs[0:3].copy(),
+                    self._penv.drone.xyz_dot.copy(),
+                    self._penv.drone.rpy.copy(),
+                    self._penv.drone.rpy_dot.copy(),
+                    _true_gyro_bias_from_sensor_noise(self.ekf_noise),
+                ]
+            )
+        )
 
         # Reset episode state
         self.mission_time        = 0.0
@@ -305,7 +360,6 @@ class UAVPrecompEnv(gymnasium.Env):
         self._v_true             = self._penv.drone.xyz_dot.copy()
         self._gps_ok             = True
         self._t_norm             = 0.0
-        self._prev_v_true        = self._penv.drone.xyz_dot.copy()
         self._dropout_duration_s = 0.0
 
         return self._get_obs(), {}
@@ -383,46 +437,77 @@ class UAVPrecompEnv(gymnasium.Env):
         self._true_pos = true_pos
         self._v_true = v_true
 
-        # IMU-driven dead-reckoning and dropout-aware covariance inflation.
-        imu_g = obs_new[10:13] if len(obs_new) > 12 else rate
-        acc_world = (v_true - self._prev_v_true) / max(self.dt, 1.0e-9)
-        rot_bw = self.kf._rotation_matrix(float(ang[0]), float(ang[1]), float(ang[2]))
-        accel_body = rot_bw.T @ (acc_world + np.array([0.0, 0.0, self.kf.g], dtype=float))
-        self.kf.update_with_imu(accel_body, imu_g)
+        # Tuned 15-state EKF predict/update path.
+        noisy_pos, noisy_vel, noisy_att, noisy_rates, _ = self.ekf_noise.add_noise(
+            pos=np.asarray(true_pos, dtype=float).reshape(3),
+            vel=np.asarray(v_true, dtype=float).reshape(3),
+            rot=np.asarray(ang, dtype=float).reshape(3),
+            omega=np.asarray(rate, dtype=float).reshape(3),
+            acc=np.zeros(3, dtype=float),
+            dt=self.dt,
+        )
+        imu_g = noisy_rates.copy()
 
         if gps_ok:
             self._dropout_duration_s = 0.0
-            self.kf.dropout_duration_s = 0.0
-            self.kf.predict()
+            self.kf.predict(omega=_motor_omega_from_applied_forces(self._penv, self.kf), dt=self.dt)
         else:
             self._dropout_duration_s += self.dt
-            self.kf.dropout_duration_s = float(self._dropout_duration_s)
-            self.kf.predict(process_noise=self.kf.make_dropout_Q(self._dropout_duration_s))
+            self.kf.predict_dropout(
+                omega=_motor_omega_from_applied_forces(self._penv, self.kf),
+                dt=self.dt,
+                dropout_time=self._dropout_duration_s,
+            )
 
-        baro_z = float(true_pos[2])
-        self.kf.update_with_baro(baro_z)
-
-        odom_velocity = getattr(self._penv, 'odometry_velocity', None)
-        if odom_velocity is None:
-            odom_velocity = getattr(self._penv.drone, 'odometry_velocity', None)
-        if odom_velocity is not None:
-            self.kf.update_with_velocity(odom_velocity, variance_xy=0.03 ** 2, variance_z=0.05 ** 2)
-        else:
-            flow_velocity_xy = getattr(self._penv, 'optical_flow_velocity_xy', None)
-            if flow_velocity_xy is None:
-                flow_velocity_xy = getattr(self._penv.drone, 'optical_flow_velocity_xy', None)
-            if flow_velocity_xy is not None:
-                flow_velocity_xy = np.asarray(flow_velocity_xy, dtype=float).reshape(2)
-                flow_velocity = np.array(
-                    [flow_velocity_xy[0], flow_velocity_xy[1], self.kf.get_velocity()[2]],
-                    dtype=float,
-                )
-                self.kf.update_with_velocity(flow_velocity, variance_xy=0.02 ** 2, variance_z=10.0)
-
+        baro_z = self.ekf_noise.add_noise_to_baro(float(true_pos[2]))
+        update_components = [
+            self.kf.build_attitude_measurement(noisy_att),
+            self.kf.build_gyro_measurement(noisy_rates),
+            self.kf.build_baro_measurement(
+                baro_z,
+                std=self.ekf_noise.baro_noise_std,
+            ),
+        ]
         if gps_ok:
-            self.kf.update_with_gps(obs_new[0:3])
-        self._ekf_pos = self.kf.get_position().copy()
-        self._prev_v_true = v_true.copy()
+            update_components.insert(2, self.kf.build_velocity_measurement(noisy_vel))
+            update_components.append(self.kf.build_gps_measurement(noisy_pos))
+        else:
+            update_components.insert(
+                2,
+                self.kf.build_velocity_pseudo_measurement(
+                    np.zeros(3, dtype=float),
+                    std_xy=PSEUDO_VEL_STD_XY,
+                    std_z=PSEUDO_VEL_STD_Z,
+                ),
+            )
+            odom_velocity = getattr(self._penv, 'odometry_velocity', None)
+            if odom_velocity is None:
+                odom_velocity = getattr(self._penv.drone, 'odometry_velocity', None)
+            odom_position = getattr(self._penv, 'odometry_position', None)
+            if odom_position is None:
+                odom_position = getattr(self._penv.drone, 'odometry_position', None)
+            if odom_position is not None or odom_velocity is not None:
+                odom_pos = noisy_pos if odom_position is None else np.asarray(odom_position, dtype=float).reshape(3)
+                odom_vel = noisy_vel if odom_velocity is None else np.asarray(odom_velocity, dtype=float).reshape(3)
+                update_components.append(
+                    self.kf.build_odom_measurement(
+                        position=odom_pos,
+                        velocity=odom_vel,
+                    )
+                )
+            else:
+                flow_velocity_xy = getattr(self._penv, 'optical_flow_velocity_xy', None)
+                if flow_velocity_xy is None:
+                    flow_velocity_xy = getattr(self._penv.drone, 'optical_flow_velocity_xy', None)
+                if flow_velocity_xy is not None:
+                    update_components.append(
+                        self.kf.build_optical_flow_measurement(flow_velocity_xy)
+                    )
+
+        for z_u, H_u, R_u in update_components:
+            self.kf.update(measurement=z_u, H=H_u, measurement_noise=R_u)
+
+        self._ekf_pos = self.kf.position.copy()
 
         # t_norm and dropout counter
         if self.prev_gps_ok and not gps_ok:

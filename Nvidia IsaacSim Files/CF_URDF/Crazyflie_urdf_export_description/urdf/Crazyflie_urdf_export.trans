@@ -1,0 +1,4 @@
+<?xml version="1.0" ?>
+<robot name="Crazyflie_urdf_export" xmlns:xacro="http://www.ros.org/wiki/xacro" >
+
+</robot>

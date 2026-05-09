@@ -2,19 +2,19 @@
 """
 Train Position-Drift LSTM
 =========================
-Trains a multi-horizon LSTM to predict EKF dead-reckoning position error.
+Trains a multi-horizon LSTM to predict tuned 15-state EKF position drift during dropout.
 
   Input  (300 steps × 6): [vx, vy, vz, wx, wy, wz]
                            velocity + gyro (both GPS-independent)
                            300 steps = 1.5 s context window
 
-  Output (5 horizons × 3): position drift = dead_reckoning_pos - true_pos
+  Output (5 horizons × 3): position drift = shadow_ekf_pos - true_pos
                             at t+50, t+100, t+150, t+200, t+250 steps ahead
                             = +0.25 s, +0.5 s, +0.75 s, +1.0 s, +1.25 s
 
 The LSTM learns the *pattern* of drift accumulation from velocity and
-rotation-rate history, allowing the EKF to apply a learned correction
-on top of dead-reckoning during GPS dropout.
+rotation-rate history, allowing the tuned 15-state EKF to apply a learned
+correction during GPS dropout.
 
 Architecture: identical to v3_fast so it is a drop-in replacement.
   - Input projection:  6 → 256
@@ -27,6 +27,7 @@ Weights saved to: experiments/lstm_position_drift.pt
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -37,12 +38,38 @@ from datetime import datetime
 import json
 import pickle
 
+def parse_args():
+    p = argparse.ArgumentParser(description="Train the position-drift LSTM.")
+    p.add_argument("--max-missions", type=int, default=None,
+                   help="Optional cap on the number of loaded missions for quick smoke tests.")
+    p.add_argument("--max-sequences", type=int, default=None,
+                   help="Optional cap on total training sequences after dataset construction.")
+    p.add_argument("--all-datasets", action="store_true",
+                   help="Load and concatenate all matching precomputed dataset files. Default uses only the newest file.")
+    p.add_argument("--epochs", type=int, default=600,
+                   help="Number of training epochs.")
+    p.add_argument("--batch-size", type=int, default=256,
+                   help="Mini-batch size.")
+    p.add_argument("--seed", type=int, default=0,
+                   help="Random seed for dataset split and training.")
+    p.add_argument("--save-path", type=str, default="experiments/lstm_position_drift_precomp.pt",
+                   help="Where to save trained weights.")
+    p.add_argument("--results-path", type=str, default="experiments/lstm_position_drift_precomp_results.json",
+                   help="Where to save training summary JSON.")
+    return p.parse_args()
+
+
+args = parse_args()
+torch.manual_seed(args.seed)
+np.random.seed(args.seed)
+
 print("\n" + "="*100)
 print("TRAIN POSITION-DRIFT LSTM")
 print("="*100 + "\n")
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print(f"Device: {device}\n")
+print(f"Device: {device}")
+print(f"Seed: {args.seed}\n")
 
 # =========================================================
 # Model  (same architecture as v3_fast — drop-in replacement)
@@ -50,11 +77,11 @@ print(f"Device: {device}\n")
 
 class PositionDriftLSTM(nn.Module):
     """
-    Multi-horizon LSTM for predicting GPS dead-reckoning position drift.
+    Multi-horizon LSTM for predicting tuned dropout-EKF position drift.
 
     Input:  [vx, vy, vz, wx, wy, wz, t_norm]  (7 features)
             velocity + gyro + time-since-dropout (normalised 0->1)
-    Output: position_drift[h] = DR_pos - true_pos  at horizon h=1..7
+    Output: position_drift[h] = shadow_ekf_pos - true_pos  at horizon h=1..7
             horizons at +0.5s, +1.0s, +1.5s, +2.0s, +2.5s, +3.0s, +3.5s
     """
     def __init__(self, horizon_steps=7, hidden_size=256):
@@ -155,11 +182,11 @@ class PositionDriftDataset(Dataset):
 print("[1/5] Loading dataset...\n")
 
 data_dir  = Path('data/position_drift')
-pkl_files = sorted(data_dir.glob('position_drift_precomp_*.pkl'))
+pkl_files = sorted(data_dir.glob('position_drift_precomp_*.pkl'), key=lambda p: p.stat().st_mtime)
 
 if not pkl_files:
     print("  ERROR: Dataset not found!")
-    print("  Run: python generate_position_drift_data.py\n")
+    print("  Run: python EKF_With_LSTM/collect_pybullet_position_drift_data_precomp.py --num-missions 2\n")
     sys.exit(1)
 
 # Load ONLY PyBullet-collected PKL files.
@@ -171,13 +198,29 @@ if not pybullet_files:
     print("  Run: python collect_pybullet_position_drift_data_precomp.py\n")
     sys.exit(1)
 
+if args.all_datasets:
+    selected_files = pybullet_files
+    print(f"  Using all precomputed datasets: {len(selected_files)} file(s)")
+else:
+    selected_files = [pybullet_files[-1]]
+    print(f"  Using newest precomputed dataset only: {selected_files[0].name}")
+
 missions = []
-for pkl_file in pybullet_files:
+for pkl_file in selected_files:
     with open(pkl_file, 'rb') as f:
         m = pickle.load(f)
     print(f"  Loading (pybullet): {pkl_file.name}  -> {len(m)} missions")
     missions.extend(m)
+
+if args.max_missions is not None:
+    missions = missions[:max(0, int(args.max_missions))]
+    print(f"  Using capped mission subset: {len(missions)} missions")
+
 print(f"\n  Total missions: {len(missions)}\n")
+
+if not missions:
+    print("  ERROR: No missions selected after applying --max-missions.\n")
+    sys.exit(1)
 
 # =========================================================
 # Prepare sequences
@@ -185,19 +228,42 @@ print(f"\n  Total missions: {len(missions)}\n")
 
 print("[2/5] Building sequences...\n")
 dataset = PositionDriftDataset(missions, seq_len=300, stride=10)
+
+if args.max_sequences is not None:
+    keep = max(0, int(args.max_sequences))
+    dataset.sequences = dataset.sequences[:keep]
+    print(f"  Using capped sequence subset: {len(dataset.sequences):,} sequences")
+
 print(f"  Total sequences: {len(dataset):,}\n")
+
+if len(dataset) < 3:
+    print("  ERROR: Need at least 3 sequences to build train/val/test splits.\n")
+    sys.exit(1)
 
 train_size = int(0.70 * len(dataset))
 val_size   = int(0.15 * len(dataset))
 test_size  = len(dataset) - train_size - val_size
 
+if train_size == 0:
+    train_size = 1
+if val_size == 0:
+    val_size = 1
+test_size = len(dataset) - train_size - val_size
+if test_size <= 0:
+    test_size = 1
+    if train_size > val_size and train_size > 1:
+        train_size -= 1
+    elif val_size > 1:
+        val_size -= 1
+
 train_ds, val_ds, test_ds = torch.utils.data.random_split(
-    dataset, [train_size, val_size, test_size]
+    dataset, [train_size, val_size, test_size],
+    generator=torch.Generator().manual_seed(args.seed),
 )
 
-train_loader = DataLoader(train_ds, batch_size=256, shuffle=True,  num_workers=0, pin_memory=(device=='cuda'))
-val_loader   = DataLoader(val_ds,   batch_size=256, shuffle=False, num_workers=0, pin_memory=(device=='cuda'))
-test_loader  = DataLoader(test_ds,  batch_size=256, shuffle=False, num_workers=0, pin_memory=(device=='cuda'))
+train_loader = DataLoader(train_ds, batch_size=min(args.batch_size, len(train_ds)), shuffle=True,  num_workers=0, pin_memory=(device=='cuda'))
+val_loader   = DataLoader(val_ds,   batch_size=min(args.batch_size, len(val_ds)),   shuffle=False, num_workers=0, pin_memory=(device=='cuda'))
+test_loader  = DataLoader(test_ds,  batch_size=min(args.batch_size, len(test_ds)),  shuffle=False, num_workers=0, pin_memory=(device=='cuda'))
 
 print(f"  Train: {len(train_ds):,}  Val: {len(val_ds):,}  Test: {len(test_ds):,}\n")
 
@@ -217,21 +283,30 @@ print(f"  Architecture: {model.hidden_size} hidden, {model.num_layers} LSTM laye
 
 print("[4/5] Training...\n")
 
-SAVE_PATH = Path('experiments/lstm_position_drift_precomp.pt')
+SAVE_PATH = Path(args.save_path)
+SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=3e-3)   # scaled for batch_size=256
+# LR was tuned for batch_size=256; rescale linearly so smaller batches don't explode.
+BASE_LR  = 3e-3
+BASE_BS  = 256
+lr_scaled = BASE_LR * (args.batch_size / BASE_BS)
+optimizer = optim.Adam(model.parameters(), lr=lr_scaled)
+print(f"  Optimizer LR: {lr_scaled:.2e} (base {BASE_LR} scaled for batch_size={args.batch_size})")
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, mode='min', factor=0.5, patience=10)
+
+GRAD_CLIP_NORM   = 1.0
+EXPLOSION_FACTOR = 5.0   # if val loss grows >5x best, restore best weights
 
 # Horizon weights: nearer horizons matter more (7 horizons, +0.5s to +3.5s)
 h_weights = torch.tensor([0.25, 0.20, 0.17, 0.14, 0.11, 0.08, 0.05]).to(device)
 
 best_val_loss   = float('inf')
-patience        = 60
+patience        = 25
 patience_counter = 0
 history         = []
-num_epochs      = 600
+num_epochs      = int(args.epochs)
 
 for epoch in range(num_epochs):
     # ---- Train ----
@@ -246,6 +321,7 @@ for epoch in range(num_epochs):
         loss  = sum(h_weights[h] * criterion(preds[:, h, :], y_batch[:, h, :])
                     for h in range(7))
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_NORM)
         optimizer.step()
         train_loss += loss.item()
     train_loss /= len(train_loader)
@@ -262,14 +338,27 @@ for epoch in range(num_epochs):
                             for h in range(7)).item()
     val_loss /= len(val_loader)
 
-    scheduler.step(val_loss)
-
-    if val_loss < best_val_loss:
-        best_val_loss   = val_loss
-        patience_counter = 0
-        torch.save(model.state_dict(), SAVE_PATH)
-    else:
+    # Guard against NaN/inf or runaway divergence: restore best checkpoint
+    # and halve LR rather than letting the run waste epochs at high loss.
+    if (not np.isfinite(val_loss)) or (
+        np.isfinite(best_val_loss) and val_loss > EXPLOSION_FACTOR * best_val_loss
+    ):
+        if SAVE_PATH.exists():
+            print(f"  [!] Val loss exploded ({val_loss:.5f} vs best {best_val_loss:.5f}); "
+                  f"restoring best weights and halving LR.", flush=True)
+            model.load_state_dict(torch.load(SAVE_PATH, map_location=device))
+            for g in optimizer.param_groups:
+                g['lr'] = max(g['lr'] * 0.5, 1.0e-6)
         patience_counter += 1
+    else:
+        scheduler.step(val_loss)
+
+        if val_loss < best_val_loss:
+            best_val_loss   = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), SAVE_PATH)
+        else:
+            patience_counter += 1
 
     history.append({'epoch': epoch + 1, 'train': train_loss, 'val': val_loss})
 
@@ -351,7 +440,8 @@ results = {
     },
 }
 
-result_file = Path('experiments/lstm_position_drift_precomp_results.json')
+result_file = Path(args.results_path)
+result_file.parent.mkdir(parents=True, exist_ok=True)
 with open(result_file, 'w') as f:
     json.dump(results, f, indent=2)
 
@@ -365,7 +455,7 @@ Position-Drift LSTM:
 
   Architecture : {model.hidden_size} hidden, {model.num_layers} LSTM layer(s), {model.horizon_steps} horizons
   Input        : velocity + gyro (GPS-independent)
-  Target       : dead_reckoning_pos - true_pos  (metres)
+  Target       : shadow_ekf_pos - true_pos  (metres)
   Parameters   : {total_params:,}
 
   Best val loss : {best_val_loss:.5f}
