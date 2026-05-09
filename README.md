@@ -98,13 +98,13 @@ Before RL, verify that baseline control is stable. Go to /examples to run code t
 Run:
 
 ```bash
-python examples/follow_path_test.py
+python examples/no_dropout/follow_path_test.py
 ```
 
 or:
 
 ```bash
-python examples/train_takeoff_hover.py
+python examples/training/train_takeoff_hover.py
 ```
 
 Expected behavior:
@@ -165,10 +165,10 @@ python -m phoenix_drone_simulation.play --env DroneSquareEnv-v0 --random
 
 | Script | Purpose |
 |---|---|
-| `examples/follow_path_test.py` | PID trajectory tracking |
-| `examples/train_takeoff_hover.py` | Basic stabilization |
-| `examples/train_mission_trajectory.py` | RL trajectory training |
-| `examples/follow_path_dropout_mission.py` | Dropout experiments |
+| `examples/no_dropout/follow_path_test.py` | PID trajectory tracking |
+| `examples/training/train_takeoff_hover.py` | Basic stabilization |
+| `examples/training/train_mission_trajectory.py` | RL trajectory training |
+| `examples/dropout_ekf/follow_path_dropout_mission.py` | Dropout experiments |
 
 ## 10. Key Concepts
 
@@ -206,7 +206,7 @@ The EKF provides robust state estimation for 12-state quadcopter dynamics (posit
 **Run 30-trial Monte Carlo validation** (generates publication-grade plots):
 
 ```bash
-python examples/ekf_validation.py --n-trials 30 --save-dir results/ --show
+python examples/ekf/ekf_validation.py --n-trials 30 --save-dir results/ --show
 ```
 
 This generates 6 figures in `results/`:
@@ -227,7 +227,7 @@ Expected results:
 **Launch PyBullet visualization with EKF feedback control**:
 
 ```bash
-python examples/follow_path_dropout_ekf_mission.py --render
+python examples/ekf/follow_path_dropout_ekf_mission.py --render
 ```
 
 The drone executes:
@@ -248,7 +248,7 @@ Generates end-of-run plot: Reference vs Measured position (X/Y/Z).
 ### Headless Mode (no GUI)
 
 ```bash
-python examples/follow_path_dropout_ekf_mission.py
+python examples/ekf/follow_path_dropout_ekf_mission.py
 ```
 
 Runs the mission silently and generates the reference vs measured plot.
@@ -265,7 +265,7 @@ Located in: `AI_UAV_Tests/quadcopter_ekf.py` (lines 66-106)
 ### EKF API
 
 ```python
-from AI_UAV_Tests.quadcopter_ekf import PhoenixEKFAdapter
+from AI_UAV_Tests.ekf.quadcopter_ekf import PhoenixEKFAdapter
 
 ekf = PhoenixEKFAdapter(dt=0.01)
 

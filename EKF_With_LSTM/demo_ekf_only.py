@@ -10,9 +10,12 @@ uncorrected. Use this as the visual/numerical baseline against demo_rl_precomp.p
 """
 
 import sys, os
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), 'AI_UAV_Tests'))
-sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), 'GPS_Dropout_Recovery'))
+SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+
+for path in [SCRIPT_DIR, ROOT_DIR]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 import time
 import numpy as np
@@ -34,7 +37,7 @@ PLAYBACK_SLOWDOWN    = 1.0
 print("[1] Creating PyBullet environment...")
 from phoenix_drone_simulation.envs.control import AttitudeRate
 from phoenix_drone_simulation.envs.mission import DroneMissionEnv
-from quadcopter_env import QuadcopterPID
+from AI_UAV_Tests.core.quadcopter_env import QuadcopterPID
 from kalman_filter_ins import KalmanFilterINS
 
 def thrust_to_action(U1, mass, g=9.81):

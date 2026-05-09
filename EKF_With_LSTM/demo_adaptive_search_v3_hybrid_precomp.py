@@ -129,9 +129,9 @@ print("[2] Creating PyBullet environment with GUI...")
 
 from phoenix_drone_simulation.envs.control import AttitudeRate
 from phoenix_drone_simulation.envs.mission import DroneMissionEnv
-from quadcopter_env import QuadcopterPID
-from AI_UAV_Tests.quadcopter_ekf import QuadcopterEKF
-from AI_UAV_Tests.sensors_ekf import EKFSensorNoise
+from AI_UAV_Tests.core.quadcopter_env import QuadcopterPID
+from AI_UAV_Tests.ekf.quadcopter_ekf import QuadcopterEKF
+from AI_UAV_Tests.ekf.sensors_ekf import EKFSensorNoise
 
 def thrust_to_action(U1, mass, g=9.81):
     hover_T = mass * g

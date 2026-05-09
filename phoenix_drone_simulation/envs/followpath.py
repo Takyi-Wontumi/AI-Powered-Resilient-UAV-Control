@@ -4,7 +4,7 @@ Author: Lawrence Wontumi (2025)
 import logging
 import numpy as np
 from phoenix_drone_simulation.envs.base import DroneBaseEnv
-from AI_UAV_Tests.trajectories_library import Trajectories as path
+from AI_UAV_Tests.core.trajectories_library import Trajectories as path
 import matplotlib.pyplot as plt
 
 

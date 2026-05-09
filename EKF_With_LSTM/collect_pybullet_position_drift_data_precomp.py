@@ -175,9 +175,9 @@ print("[1/4] Loading dependencies...")
 try:
     from phoenix_drone_simulation.envs.control import AttitudeRate
     from phoenix_drone_simulation.envs.mission import DroneMissionEnv
-    from quadcopter_env import QuadcopterPID
-    from AI_UAV_Tests.quadcopter_ekf import QuadcopterEKF
-    from AI_UAV_Tests.sensors_ekf import EKFSensorNoise
+    from AI_UAV_Tests.core.quadcopter_env import QuadcopterPID
+    from AI_UAV_Tests.ekf.quadcopter_ekf import QuadcopterEKF
+    from AI_UAV_Tests.ekf.sensors_ekf import EKFSensorNoise
 except ImportError as e:
     print(f"  ERROR: {e}")
     print("  Ensure phoenix_drone_simulation, quadcopter_env, quadcopter_ekf, sensors_ekf are on sys.path")

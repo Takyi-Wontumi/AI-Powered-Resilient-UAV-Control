@@ -33,8 +33,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(THIS_FILE), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from AI_UAV_Tests.quadcopter_env import QuadcopterPID
-from AI_UAV_Tests.motor_mapping import make_motor_map_layer
+from AI_UAV_Tests.core.quadcopter_env import QuadcopterPID
+from AI_UAV_Tests.hardware.motor_mapping import make_motor_map_layer
 
 
 URI = "radio://0/80/2M/E7E7E7E7E7"

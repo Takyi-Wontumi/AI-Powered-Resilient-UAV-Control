@@ -53,9 +53,9 @@ from pathlib import Path
 
 from phoenix_drone_simulation.envs.control import AttitudeRate
 from phoenix_drone_simulation.envs.mission import DroneMissionEnv
-from AI_UAV_Tests.quadcopter_env import QuadcopterPID
-from AI_UAV_Tests.quadcopter_ekf import QuadcopterEKF
-from AI_UAV_Tests.sensors_ekf import EKFSensorNoise
+from AI_UAV_Tests.core.quadcopter_env import QuadcopterPID
+from AI_UAV_Tests.ekf.quadcopter_ekf import QuadcopterEKF
+from AI_UAV_Tests.ekf.sensors_ekf import EKFSensorNoise
 
 # ── Constants (must match data collector / precomp trainer) ───────────────────
 SHADOW_RESET_INTERVAL = 2500    # steps between EKF resets in collector

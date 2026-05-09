@@ -101,7 +101,7 @@ print(f"    [OK] RL policy loaded  ({POLICY_MODEL_PATH.name})\n")
 print("[2] Creating PyBullet environment...")
 from phoenix_drone_simulation.envs.control import AttitudeRate
 from phoenix_drone_simulation.envs.mission import DroneMissionEnv
-from quadcopter_env import QuadcopterPID
+from AI_UAV_Tests.core.quadcopter_env import QuadcopterPID
 from kalman_filter_ins import KalmanFilterINS
 
 def thrust_to_action(U1, mass, g=9.81):

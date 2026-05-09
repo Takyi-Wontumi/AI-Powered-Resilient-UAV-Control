@@ -98,13 +98,13 @@ Before RL, verify that baseline control is stable.
 Run:
 
 ```bash
-python examples/follow_path_test.py
+python examples/no_dropout/follow_path_test.py
 ```
 
 or:
 
 ```bash
-python examples/train_takeoff_hover.py
+python examples/training/train_takeoff_hover.py
 ```
 
 Expected behavior:

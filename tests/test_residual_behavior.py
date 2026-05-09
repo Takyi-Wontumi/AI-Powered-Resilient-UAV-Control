@@ -1,5 +1,5 @@
 import numpy as np
-from AI_UAV_Tests.rl_dropout_policy import DroneDropoutRLEnv
+from AI_UAV_Tests.rl.rl_dropout_policy import DroneDropoutRLEnv
 
 
 def test_zero_action_keeps_pid():

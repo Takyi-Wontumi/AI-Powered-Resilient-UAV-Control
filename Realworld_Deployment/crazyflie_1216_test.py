@@ -28,11 +28,11 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(THIS_FILE), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from AI_UAV_Tests.quadcopter_env import QuadcopterPID
-from AI_UAV_Tests.trajectories_library import FlightMission, Trajectories as path
+from AI_UAV_Tests.core.quadcopter_env import QuadcopterPID
+from AI_UAV_Tests.core.trajectories_library import FlightMission, Trajectories as path
 
 try:
-    from AI_UAV_Tests.trajectories_library import MissionPlannerTrajectory
+    from AI_UAV_Tests.core.trajectories_library import MissionPlannerTrajectory
 except Exception:
     MissionPlannerTrajectory = None
 

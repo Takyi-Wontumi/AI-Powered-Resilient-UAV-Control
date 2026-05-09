@@ -1,6 +1,6 @@
 from gymnasium.envs.registration import register
-from AI_UAV_Tests.trajectories_library import Trajectories as T
-from AI_UAV_Tests.trajectories_library import FlightMission
+from AI_UAV_Tests.core.trajectories_library import Trajectories as T
+from AI_UAV_Tests.core.trajectories_library import FlightMission
 
 def register_all_envs():
     # Default (circle)
